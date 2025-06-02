@@ -9,12 +9,9 @@ import plotly.express as px
 from textblob import TextBlob
 import warnings
 import random
-import pytz
-import concurrent.futures # Import for concurrent processing
 warnings.filterwarnings('ignore')
 
-INDIA_TZ = pytz.timezone('Asia/Kolkata')
-
+ pttz=pytz.timezone('Asia/Kolkata')
 # Page configuration
 st.set_page_config(
     page_title="StockSense AI",
@@ -61,7 +58,7 @@ st.markdown("""
         text-decoration: none;
     }
     .sidebar-footer a:hover {
-        text_decoration: underline;
+        text-decoration: underline;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -257,33 +254,6 @@ class StockAnalyzer:
         except Exception as e:
             print(f"Error fetching data for {symbol}: {str(e)}")
             return None, None, None
-
-    def _fetch_single_stock_info(self, symbol):
-        """Helper to fetch info for a single stock, used by concurrent fetcher."""
-        try:
-            return symbol, yf.Ticker(symbol).info
-        except Exception as e:
-            print(f"Error fetching info for {symbol}: {e}")
-            return symbol, None
-
-    def get_bulk_stock_info(self, symbols):
-        """Fetches info for multiple stocks concurrently."""
-        stock_info_map = {}
-        # Max workers chosen to balance CPU cores and network I/O. 
-        # A higher number might be beneficial for I/O-bound tasks like network requests.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor: 
-            # Submit all tasks and store futures
-            future_to_symbol = {executor.submit(self._fetch_single_stock_info, symbol): symbol for symbol in symbols}
-            
-            for future in concurrent.futures.as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
-                try:
-                    sym, info = future.result()
-                    if info:
-                        stock_info_map[sym] = info
-                except Exception as exc:
-                    print(f'{symbol} generated an exception: {exc}')
-        return stock_info_map
     
     def get_advanced_financial_metrics(self, symbol, info):
         """Calculate advanced financial metrics including Q-o-Q, Y-o-Y, PAT, Cash Flow, Holdings"""
@@ -604,12 +574,7 @@ def main():
                 recommendation, css_class = analyzer.get_recommendation(score)
                 
                 st.subheader(f"📊 Analysis for {info.get('longName', selected_stock)}")
-                
-                # Updated timestamp generation to use INDIA_TZ
-                current_time_utc = datetime.utcnow()
-                current_time_ist = current_time_utc.replace(tzinfo=pytz.utc).astimezone(INDIA_TZ)
-                formatted_time = current_time_ist.strftime("%Y-%m-%d %H:%M:%S")
-                st.info(f"**Live Data** - Last Updated: {formatted_time} IST")
+                st.info(f"**Live Data** - Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
 
                 current_price = info.get('currentPrice', info.get('regularMarketPrice', 'N/A'))
                 daily_change = info.get('dailyChange', 0.0) 
@@ -756,89 +721,75 @@ def main():
                 yoy_rev_growth_min_pct = st.number_input("Min YoY Revenue Growth (%)", value=5.0, min_value=-100.0, step=1.0, format="%.1f")
                 yoy_pat_growth_min_pct = st.number_input("Min YoY PAT Growth (%)", value=5.0, min_value=-100.0, step=1.0, format="%.1f")
         
-        # Removed the multiselect for stock categories
-        # stock_categories_to_scan = st.multiselect(
-        #     "Select stock categories to scan:",
-        #     options=["Large Cap", "Mid Cap", "Small Cap"],
-        #     default=["Large Cap", "Mid Cap"] 
-        # )
+        stock_categories_to_scan = st.multiselect(
+            "Select stock categories to scan:",
+            options=["Large Cap", "Mid Cap", "Small Cap"],
+            default=["Large Cap", "Mid Cap"] 
+        )
         
-        # Now directly scan all stocks from analyzer.all_stocks
-        stocks_to_scan_list = analyzer.all_stocks 
+        stocks_to_scan_list = []
+        if "Large Cap" in stock_categories_to_scan: stocks_to_scan_list.extend(analyzer.large_cap_stocks)
+        if "Mid Cap" in stock_categories_to_scan: stocks_to_scan_list.extend(analyzer.mid_cap_stocks)
+        if "Small Cap" in stock_categories_to_scan: stocks_to_scan_list.extend(analyzer.small_cap_stocks)
         
-        # The max_scan_limit and random.sample lines are commented out, meaning all selected stocks will be scanned.
-        # if len(stocks_to_scan_list) > max_scan_limit:
-        #     st.warning(f"Scanning is limited to {max_scan_limit} random stocks from your selection for performance.")
-        #     stocks_to_scan_list = random.sample(stocks_to_scan_list, max_scan_limit)
+        max_scan_limit = 50 
+        if len(stocks_to_scan_list) > max_scan_limit:
+            st.warning(f"Scanning is limited to {max_scan_limit} random stocks from your selection for performance.")
+            stocks_to_scan_list = random.sample(stocks_to_scan_list, max_scan_limit)
 
 
         if st.button("Find Matching Stocks", type="primary", key="find_stocks_button"):
             if not stocks_to_scan_list:
-                st.warning("No stocks available to scan.")
-                return # Stop if no stock
+                st.warning("Please select at least one stock category.")
+                return # Stop if no category selected
 
             with st.spinner(f"Scanning {len(stocks_to_scan_list)} stocks... This might take a while."):
-                # Fetch all stock info concurrently
-                all_stock_info = analyzer.get_bulk_stock_info(stocks_to_scan_list)
-
                 filtered_stocks_data = []
                 progress_bar = st.progress(0)
                 
                 for i, stock_symbol in enumerate(stocks_to_scan_list):
-                    s_info = all_stock_info.get(stock_symbol) # Get pre-fetched info
-                    
-                    if s_info:
-                        s_metrics = analyzer.get_advanced_financial_metrics(stock_symbol, s_info)
-                        
-                        pe_val = s_metrics.get('PE_Ratio') if s_metrics.get('PE_Ratio') is not None else float('inf')
-                        roe_val = s_metrics.get('ROE', 0) if s_metrics.get('ROE') is not None else 0
-                        mcap_val = s_metrics.get('Market_Cap', 0) if s_metrics.get('Market_Cap') is not None else 0
-                        yoy_rev_val = s_metrics.get('YoY_Revenue_Growth', -float('inf')) if s_metrics.get('YoY_Revenue_Growth') is not None else -float('inf')
-                        yoy_pat_val = s_metrics.get('YoY_PAT_Growth', -float('inf')) if s_metrics.get('YoY_PAT_Growth') is not None else -float('inf')
-                        de_val = s_metrics.get('Debt_to_Equity', float('inf')) if s_metrics.get('Debt_to_Equity') is not None else float('inf')
-
-                        # Determine stock category
-                        category = "N/A"
-                        if stock_symbol in analyzer.large_cap_stocks:
-                            category = "Large Cap"
-                        elif stock_symbol in analyzer.mid_cap_stocks:
-                            category = "Mid Cap"
-                        elif stock_symbol in analyzer.small_cap_stocks:
-                            category = "Small Cap"
-
-                        if (pe_min <= pe_val <= pe_max and
-                            roe_val >= roe_min_pct / 100 and
-                            (mcap_min_cr * 1e7) <= mcap_val <= (mcap_max_cr * 1e7) and
-                            yoy_rev_val >= yoy_rev_growth_min_pct and
-                            yoy_pat_val >= yoy_pat_growth_min_pct and
-                            de_val <= de_max):
+                    try:
+                        _, s_info, _ = analyzer.get_stock_data(stock_symbol, period='1mo') 
+                        if s_info:
+                            s_metrics = analyzer.get_advanced_financial_metrics(stock_symbol, s_info)
                             
-                            stock_score = analyzer.enhanced_scoring_system(s_metrics)
-                            stock_rec, _ = analyzer.get_recommendation(stock_score)
-                            filtered_stocks_data.append({
-                                'Symbol': stock_symbol.replace('.NS', ''),
-                                'Name': s_info.get('shortName', stock_symbol),
-                                'Price': s_info.get('currentPrice', 'N/A'),
-                                'Category': category, # Added category to results
-                                'P/E': f"{pe_val:.2f}" if pe_val != float('inf') else "N/A",
-                                'ROE (%)': f"{roe_val*100:.2f}",
-                                'Mkt Cap (Cr)': f"{mcap_val/1e7:.2f}",
-                                'YoY Rev (%)': f"{yoy_rev_val:.2f}" if yoy_rev_val != -float('inf') else "N/A",
-                                'YoY PAT (%)': f"{yoy_pat_val:.2f}" if yoy_pat_val != -float('inf') else "N/A",
-                                'D/E Ratio': f"{de_val:.2f}" if de_val != float('inf') else "N/A",
-                                'Score': stock_score, 'AI Rec.': stock_rec
-                            })
-                    else: 
-                        print(f"Skipping {stock_symbol} due to missing info.")
+                            pe_val = s_metrics.get('PE_Ratio') if s_metrics.get('PE_Ratio') is not None else float('inf')
+                            roe_val = s_metrics.get('ROE', 0) if s_metrics.get('ROE') is not None else 0
+                            mcap_val = s_metrics.get('Market_Cap', 0) if s_metrics.get('Market_Cap') is not None else 0
+                            yoy_rev_val = s_metrics.get('YoY_Revenue_Growth', -float('inf')) if s_metrics.get('YoY_Revenue_Growth') is not None else -float('inf')
+                            yoy_pat_val = s_metrics.get('YoY_PAT_Growth', -float('inf')) if s_metrics.get('YoY_PAT_Growth') is not None else -float('inf')
+                            de_val = s_metrics.get('Debt_to_Equity', float('inf')) if s_metrics.get('Debt_to_Equity') is not None else float('inf')
+
+                            if (pe_min <= pe_val <= pe_max and
+                                roe_val >= roe_min_pct / 100 and
+                                (mcap_min_cr * 1e7) <= mcap_val <= (mcap_max_cr * 1e7) and
+                                yoy_rev_val >= yoy_rev_growth_min_pct and
+                                yoy_pat_val >= yoy_pat_growth_min_pct and
+                                de_val <= de_max):
+                                
+                                stock_score = analyzer.enhanced_scoring_system(s_metrics)
+                                stock_rec, _ = analyzer.get_recommendation(stock_score)
+                                filtered_stocks_data.append({
+                                    'Symbol': stock_symbol.replace('.NS', ''),
+                                    'Name': s_info.get('shortName', stock_symbol),
+                                    'Price': s_info.get('currentPrice', 'N/A'),
+                                    'P/E': f"{pe_val:.2f}" if pe_val != float('inf') else "N/A",
+                                    'ROE (%)': f"{roe_val*100:.2f}",
+                                    'Mkt Cap (Cr)': f"{mcap_val/1e7:.2f}",
+                                    'YoY Rev (%)': f"{yoy_rev_val:.2f}" if yoy_rev_val != -float('inf') else "N/A",
+                                    'YoY PAT (%)': f"{yoy_pat_val:.2f}" if yoy_pat_val != -float('inf') else "N/A",
+                                    'D/E Ratio': f"{de_val:.2f}" if de_val != float('inf') else "N/A",
+                                    'Score': stock_score, 'AI Rec.': stock_rec
+                                })
+                    except Exception as e: 
+                        print(f"Error processing {stock_symbol} in Stock Picker: {e}")
+                        pass
                     progress_bar.progress((i + 1) / len(stocks_to_scan_list))
                 
                 if filtered_stocks_data:
                     st.success(f"Found {len(filtered_stocks_data)} matching stocks.")
                     df_results = pd.DataFrame(filtered_stocks_data)
-                    # Reorder columns to place 'Category' after 'Price'
-                    cols = ['Symbol', 'Name', 'Price', 'Category', 'P/E', 'ROE (%)', 'Mkt Cap (Cr)', 
-                            'YoY Rev (%)', 'YoY PAT (%)', 'D/E Ratio', 'Score', 'AI Rec.']
-                    st.dataframe(df_results[cols], hide_index=True)
+                    st.dataframe(df_results, hide_index=True)
                 else:
                     st.info("No stocks found matching your criteria. Try adjusting the filters.")
     

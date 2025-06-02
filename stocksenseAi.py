@@ -1,873 +1,1193 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import altair as alt
+import requests
+import json
 from datetime import datetime, timedelta
-import plotly.graph_objects as go
+import time
+import asyncio
+import aiohttp
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import talib
 from textblob import TextBlob
+import schedule
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
-import random
-import pytz
 warnings.filterwarnings('ignore')
 
-
-# Page configuration
+# Page config
 st.set_page_config(
-    page_title="StockSense AI",
-    page_icon="📈",
+    page_title="NSE Pro Screener & Analytics",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Enhanced Custom CSS
 st.markdown("""
 <style>
     .main-header {
         font-size: 3rem;
-        font-weight: bold;
-        text-align: center;
-        background: linear-gradient(90deg, #1f77b4, #ff7f0e);
+        font-weight: 800;
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
+        text-align: center;
         margin-bottom: 2rem;
     }
     .metric-card {
-        background: #f0f2f6;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 15px;
+        color: white;
+        text-align: center;
+        margin: 0.5rem 0;
+        box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);
+        backdrop-filter: blur(4px);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    .alert-card {
+        background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
         padding: 1rem;
         border-radius: 10px;
+        color: white;
         margin: 0.5rem 0;
+        animation: pulse 2s infinite;
     }
-    .buy-signal { color: #00c851; font-weight: bold; }
-    .hold-signal { color: #ffbb33; font-weight: bold; }
-    .sell-signal { color: #ff4444; font-weight: bold; }
-    .positive-change { color: #00c851; }
-    .negative-change { color: #ff4444; }
-    .section-divider {
-        margin: 2rem 0;
-        border-top: 2px solid #e0e0e0;
-        padding-top: 2rem;
+    @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.02); }
+        100% { transform: scale(1); }
     }
-    .sidebar-footer {
-        font-size: 0.9rem;
-        color: #777;
-        padding-top: 1rem;
+    .volume-spike { 
+        background: linear-gradient(45deg, #ff9a9e 0%, #fecfef 100%);
+        color: #d63384;
+        font-weight: bold;
+        padding: 0.2rem 0.5rem;
+        border-radius: 5px;
     }
-    .sidebar-footer a {
-        color: #1f77b4;
-        text-decoration: none;
+    .dii-increase { color: #28a745; font-weight: bold; }
+    .dii-decrease { color: #dc3545; font-weight: bold; }
+    .fii-increase { color: #17a2b8; font-weight: bold; }
+    .fii-decrease { color: #fd7e14; font-weight: bold; }
+    .promoter-increase { color: #6f42c1; font-weight: bold; }
+    .promoter-decrease { color: #e83e8c; font-weight: bold; }
+    .stSpinner > div {
+        border-top-color: #667eea;
     }
-    .sidebar-footer a:hover {
-        text-decoration: underline;
+    .stButton>button {
+        background-color: #667eea;
+        color: white;
+        border-radius: 8px;
+        padding: 0.6rem 1.2rem;
+        font-weight: bold;
+        border: none;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        background-color: #764ba2;
+        box-shadow: 0 6px 20px rgba(118, 75, 162, 0.5);
+        transform: translateY(-2px);
     }
 </style>
 """, unsafe_allow_html=True)
 
-class StockAnalyzer:
+# Initialize session state with enhanced data structures
+def initialize_session_state():
+    defaults = {
+        'stock_data': pd.DataFrame(),
+        'technical_data': {}, # Will store more detailed technical data for charts
+        'news_sentiment': {}, # Will store more detailed sentiment for charts
+        'volume_alerts': [],
+        'stakeholder_changes': {},
+        'last_update': None,
+        'auto_update_enabled': False,
+        'alert_settings': {
+            'volume_spike_threshold': 200,  # 200% above average
+            'stakeholder_change_threshold': 1.0  # 1% change
+        },
+        'selected_stock_for_chart': None,
+        'trigger_update': False # Flag to trigger manual/auto update
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+initialize_session_state()
+
+class EnhancedNSEScreener:
     def __init__(self):
-        # Extended stock lists with 50 stocks each
-        self.large_cap_stocks = [
-            'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'HINDUNILVR.NS',
-            'INFY.NS', 'KOTAKBANK.NS', 'SBIN.NS', 'BHARTIARTL.NS', 'ITC.NS',
-            'ASIANPAINT.NS', 'LT.NS', 'AXISBANK.NS', 'MARUTI.NS', 'SUNPHARMA.NS',
-            'ULTRACEMCO.NS', 'TITAN.NS', 'BAJFINANCE.NS', 'NESTLEIND.NS', 'POWERGRID.NS',
-            'NTPC.NS', 'TECHM.NS', 'HCLTECH.NS', 'WIPRO.NS', 'COALINDIA.NS',
-            'TATAMOTORS.NS', 'BAJAJFINSV.NS', 'ONGC.NS', 'GRASIM.NS', 'JSWSTEEL.NS',
-            'TATASTEEL.NS', 'HINDALCO.NS', 'ADANIPORTS.NS', 'BRITANNIA.NS', 'SHREECEM.NS',
-            'DRREDDY.NS', 'DIVISLAB.NS', 'CIPLA.NS', 'EICHERMOT.NS', 'HEROMOTOCO.NS',
-            'BAJAJ-AUTO.NS', 'BPCL.NS', 'IOC.NS', 'INDUSINDBK.NS', 'APOLLOHOSP.NS',
-            'HDFCLIFE.NS', 'SBILIFE.NS', 'ICICIPRULI.NS', 'ADANIENT.NS', 'M&M.NS',
-            'TATACONSUM.NS', 'GODREJCP.NS', 'DABUR.NS', 'MARICO.NS', 'COLPAL.NS',
-            'PIDILITIND.NS', 'BERGEPAINT.NS', 'ADANIGREEN.NS', 'ADANITRANS.NS', 'LTIM.NS',
-            'MINDTREE.NS', 'MPHASIS.NS', 'PERSISTENT.NS', 'COFORGE.NS', 'LTTS.NS',
-            'BIOCON.NS', 'LUPIN.NS', 'TORNTPHARM.NS', 'GLAND.NS', 'LALPATHLAB.NS',
-            'DRREDDYS.NS', 'AUBANK.NS', 'FEDERALBNK.NS', 'BANDHANBNK.NS', 'IDFCFIRSTB.NS',
-            'RBLBANK.NS', 'YESBANK.NS', 'PNB.NS', 'CANBK.NS', 'UNIONBANK.NS',
-            'BANKBARODA.NS', 'INDIANB.NS', 'CENTRALBK.NS', 'IOB.NS', 'PFC.NS',
-            'RECLTD.NS', 'IRFC.NS', 'SAIL.NS', 'NMDC.NS', 'VEDL.NS',
-            'JINDALSTEL.NS', 'JSPL.NS', 'WELCORP.NS', 'NATIONALUM.NS', 'RATNAMANI.NS',
-            'APOLLOTYRE.NS', 'MRF.NS', 'BALKRISIND.NS', 'CEAT.NS', 'JK.NS',
-            'MOTHERSON.NS', 'BOSCHLTD.NS', 'EXIDEIND.NS', 'AMARAJABAT.NS', 'TVSMOTOR.NS',
-            'BAJAJHLDNG.NS', 'ESCORTS.NS', 'FORCEMOT.NS', 'ASHOKLEY.NS', 'MAHINDCIE.NS',
-            'CUMMINSIND.NS', 'BHARATFORG.NS', 'RAMCOCEM.NS', 'JKCEMENT.NS', 'HEIDELBERG.NS',
-            'AMBUJCEM.NS', 'ACC.NS', 'INDIACEM.NS', 'DALMIA.NS', 'JKLAKSHMI.NS',
-            'ORIENTCEM.NS', 'PRISMCEM.NS', 'CENTURYPLY.NS', 'GREENPLY.NS', 'WABCOINDIA.NS',
-            'BATAINDIA.NS', 'RELAXO.NS', 'LIBERTY.NS', 'MIRCHUTE.NS', 'VBL.NS',
-            'JUBLFOOD.NS', 'WESTLIFE.NS', 'DEVYANI.NS', 'SPECIALITY.NS', 'ZOMATO.NS',
-            'NAUKRI.NS', 'PAYTM.NS', 'POLICYBZR.NS', 'AFFLE.NS', 'ROUTE.NS',
-            'INDIAMART.NS', 'JUSTDIAL.NS', 'REDINGTON.NS', 'RATEGAIN.NS', 'TATAELXSI.NS',
-            'CYIENT.NS', 'KPITTECH.NS', 'ZENSAR.NS', 'SONATSOFTW.NS', 'NIITTECH.NS',
-            'L&TFH.NS', 'CHOLAFIN.NS', 'MANAPPURAM.NS', 'MUTHOOTFIN.NS', 'MMTC.NS',
-            'SAIL.NS', 'MOIL.NS', 'GMRINFRA.NS', 'GVK.NS', 'ADANIPOWER.NS',
-            'TATAPOWER.NS', 'TORNTPOWER.NS', 'CESC.NS', 'JSPL.NS', 'JINDALSAW.NS',
-            'WELSPUNIND.NS', 'TRIDENT.NS', 'VARDHMAN.NS', 'ALOKTEXT.NS', 'PAGEIND.NS',
-            'HAVELLS.NS', 'VOLTAS.NS', 'BLUESTARCO.NS', 'WHIRLPOOL.NS', 'CROMPTON.NS',
-            'VGUARD.NS', 'ORIENTELEC.NS', 'KEI.NS', 'POLYCAB.NS', 'FINOLEX.NS',
-            'SIEMENS.NS', 'ABB.NS', 'SCHNEIDER.NS', 'HONAUT.NS', 'THERMAX.NS',
-            'BHEL.NS', 'BEML.NS', 'BEL.NS', 'HAL.NS', 'COCHINSHIP.NS',
-            'GRINDWELL.NS', 'CRISIL.NS', 'CREDITACC.NS', 'EQUITAS.NS', 'CDSL.NS',
-            'NSDL.NS', 'BSE.NS', 'MCX.NS', 'MSEI.NS', 'NAZARA.NS',
-            'DELTACORP.NS', 'ONMOBILE.NS', 'NETWORK18.NS', 'TV18BRDCST.NS', 'DISHTV.NS',
-            'SUNTV.NS', 'BALRAMCHIN.NS', 'DHANUKA.NS', 'RALLIS.NS', 'GHCL.NS',
-            'AAVAS.NS', 'HOMEFIRST.NS', 'UJJIVANSFB.NS', 'SPANDANA.NS', 'AROHAN.NS'
-        ]
-        
-        self.mid_cap_stocks = [
-            'DMART.NS', 'PIDILITIND.NS', 'BERGEPAINT.NS', 'GODREJCP.NS', 'MARICO.NS',
-            'DABUR.NS', 'COLPAL.NS', 'MCDOWELL-N.NS', 'PGHH.NS', 'HAVELLS.NS',
-            'VOLTAS.NS', 'PAGEIND.NS', 'MPHASIS.NS', 'LTIM.NS', 'LTTS.NS',
-            'PERSISTENT.NS', 'COFORGE.NS', 'BIOCON.NS', 'LUPIN.NS', 'TORNTPHARM.NS',
-            'AUBANK.NS', 'FEDERALBNK.NS', 'BANDHANBNK.NS', 'IDFCFIRSTB.NS', 'MOTHERSON.NS',
-            'ASHOKLEY.NS', 'ESCORTS.NS', 'EXIDEIND.NS', 'AMARAJABAT.NS', 'TVSMOTOR.NS',
-            'BALKRISIND.NS', 'APOLLOTYRE.NS', 'MRF.NS', 'CUMMINSIND.NS', 'BATAINDIA.NS',
-            'RELAXO.NS', 'VBL.NS', 'TATACONSUM.NS', 'JUBLFOOD.NS', 'CROMPTON.NS',
-            'WHIRLPOOL.NS', 'SIEMENS.NS', 'GODREJPROP.NS', 'OBEROIRLTY.NS', 'DLF.NS',
-            'PRESTIGE.NS', 'BRIGADE.NS', 'SOBHA.NS', 'PHOENIXLTD.NS', 'PVRINOX.NS',
-            'CONCOR.NS', 'ADANIPORTS.NS', 'APOLLOHOSP.NS', 'FORTIS.NS', 'MAXHEALTH.NS',
-            'NHPC.NS', 'SJVN.NS', 'INDIANB.NS', 'CANBK.NS', 'UNIONBANK.NS',
-            'BANKBARODA.NS', 'PNB.NS', 'IOB.NS', 'CENTRALBK.NS', 'PFC.NS',
-            'RECLTD.NS', 'IRFC.NS', 'RAILTEL.NS', 'RITES.NS', 'IRCON.NS',
-            'NBCC.NS', 'HUDCO.NS', 'NIACL.NS', 'GICRE.NS', 'ORIENTREF.NS',
-            'BPCL.NS', 'HINDPETRO.NS', 'MRPL.NS', 'GAIL.NS', 'PETRONET.NS',
-            'IGL.NS', 'MGL.NS', 'GSPL.NS', 'AEGISCHEM.NS', 'DEEPAKNI.NS',
-            'ALKYLAMINE.NS', 'CLEAN.NS', 'NOCIL.NS', 'VINDHYATEL.NS', 'JSWENERGY.NS',
-            'ADANIGREEN.NS', 'RENUKA.NS', 'BALRAMCHIN.NS', 'DHAMPUR.NS', 'BAJAJCON.NS',
-            'EMAMILTD.NS', 'GODREJIND.NS', 'JYOTHYLAB.NS', 'CHOLAHLDNG.NS', 'TIMKEN.NS',
-            'SKFINDIA.NS', 'SCHAEFFLER.NS', 'NRB.NS', 'FINEORG.NS', 'SUPRAJIT.NS',
-            'ENDURANCE.NS', 'SUNDRMFAST.NS', 'MINDAIND.NS', 'SWARAJENG.NS', 'MMTC.NS',
-            'SAIL.NS', 'MOIL.NS', 'KIOCL.NS', 'GMRINFRA.NS', 'GVK.NS',
-            'L&TFH.NS', 'SHRIRAMFIN.NS', 'CHOLAFIN.NS', 'SRTRANSFIN.NS', 'MANAPPURAM.NS',
-            'MUTHOOTFIN.NS', 'CAPLIPOINT.NS', 'CREDITACC.NS', 'SPANDANA.NS', 'AROHAN.NS',
-            'EQUITAS.NS', 'UJJIVANSFB.NS', 'ESAFSFB.NS', 'SURYODAY.NS', 'FINPIPE.NS',
-            'CDSL.NS', 'CAMS.NS', 'BSE.NS', 'MCX.NS', 'MSEI.NS',
-            'CRISIL.NS', 'CARERATING.NS', 'ICRA.NS', 'BRICKWORK.NS', 'SMIFS.NS',
-            'MOTILALOF.NS', 'ANGELONE.NS', 'IIFL.NS', 'GEOJITFSL.NS', 'VENKEYS.NS',
-            'SUGANDHA.NS', 'KRBL.NS', 'KOHINOOR.NS', 'LAXMIMACH.NS', 'TEXRAIL.NS',
-            'KNRCON.NS', 'IRB.NS', 'SADBHAV.NS', 'GPPL.NS', 'ZFSTEERING.NS',
-            'REDINGTON.NS', 'DELTACORP.NS', 'ORIENTCEM.NS', 'CENTURYPLY.NS', 'GREENPLY.NS',
-            'KANSAINER.NS', 'AIAENG.NS', 'THERMAX.NS', 'KIRLOSENG.NS', 'GRINDWELL.NS',
-            'CARYSIL.NS', 'HINDWAREAP.NS', 'DIXON.NS', 'AMBER.NS', 'POLYCAB.NS',
-            'KEI.NS', 'FINOLEX.NS', 'VGUARD.NS', 'ORIENTELEC.NS', 'SUPRAJIT.NS',
-            'MINDA.NS', 'SUNDARAM.NS', 'LUPIN.NS', 'GLENMARK.NS', 'CADILAHC.NS',
-            'ALKEM.NS', 'AJANTPHARM.NS', 'ABBOTINDIA.NS', 'PFIZER.NS', 'GSK.NS',
-            'NOVARTIS.NS', 'SANOFI.NS', 'MERCK.NS', 'JBCHEPHARM.NS', 'STRIDES.NS',
-            'CAPLIN.NS', 'LAURUSLABS.NS', 'SUVEN.NS', 'PIRAMAL.NS', 'WOCKPHARMA.NS',
-            'ZYDUSWEL.NS', 'AUROPHARMA.NS', 'ZYDUSLIFE.NS', 'DIVIS.NS', 'SEQUENT.NS',
-            'GRANULES.NS', 'LALPATHLAB.NS', 'METROPOLIS.NS', 'THYROCARE.NS', 'SRL.NS',
-            'KIMS.NS', 'RAINBOW.NS', 'GLOBALHLT.NS', 'VIJAYABANK.NS', 'SYNDIBANK.NS',
-            'DENABANK.NS', 'CORPBANK.NS', 'ANDHRABANK.NS', 'ALLAHABAD.NS', 'ORIENTBANK.NS'
-        ]
-        
-        self.small_cap_stocks = [
-            'AFFLE.NS', 'ROUTE.NS', 'INDIAMART.NS', 'ZOMATO.NS', 'PAYTM.NS',
-            'POLICYBZR.NS', 'FSL.NS', 'CARBORUNIV.NS', 'PGHL.NS', 'VINATIORGA.NS',
-            'SYMPHONY.NS', 'RAJESHEXPO.NS', 'ASTRAL.NS', 'NILKAMAL.NS', 'CERA.NS',
-            'JKCEMENT.NS', 'RAMCOCEM.NS', 'HEIDELBERG.NS', 'PRISMCEM.NS', 'SUPRAJIT.NS',
-            'SCHAEFFLER.NS', 'TIMKEN.NS', 'SKFINDIA.NS', 'NRBBEARING.NS', 'FINEORG.NS',
-            'AAVAS.NS', 'HOMEFIRST.NS', 'UJJIVANSFB.NS', 'SPANDANA.NS', 'CREDITACC.NS',
-            'LAXMIMACH.NS', 'TEXRAIL.NS', 'KNRCON.NS', 'IRB.NS', 'SADBHAV.NS',
-            'GPPL.NS', 'ZFSTEERING.NS', 'REDINGTON.NS', 'DELTACORP.NS', 'ORIENTCEM.NS',
-            'CENTURYPLY.NS', 'GREENPLY.NS', 'KANSAINER.NS', 'AIAENG.NS', 'THERMAX.NS',
-            'KIRLOSENG.NS', 'GRINDWELL.NS', 'CARYSIL.NS', 'HINDWAREAP.NS', 'DIXON.NS',
-            'RPOWER.NS', 'ADANIPOWER.NS', 'TATAPOWER.NS', 'TORNTPOWER.NS', 'CESC.NS',
-            'JINDALSAW.NS', 'WELSPUNIND.NS', 'TRIDENT.NS', 'VARDHMAN.NS', 'ALOKTEXT.NS',
-            'BLUESTARCO.NS', 'VGUARD.NS', 'ORIENTELEC.NS', 'KEI.NS', 'POLYCAB.NS',
-            'FINOLEX.NS', 'ABB.NS', 'SCHNEIDER.NS', 'HONAUT.NS', 'BHEL.NS',
-            'BEML.NS', 'BEL.NS', 'HAL.NS', 'COCHINSHIP.NS', 'MAZAGON.NS',
-            'CRISIL.NS', 'EQUITAS.NS', 'CDSL.NS', 'NSDL.NS', 'BSE.NS',
-            'MCX.NS', 'MSEI.NS', 'NAZARA.NS', 'ONMOBILE.NS', 'NETWORK18.NS',
-            'TV18BRDCST.NS', 'DISHTV.NS', 'SUNTV.NS', 'DHANUKA.NS', 'RALLIS.NS',
-            'GHCL.NS', 'AROHAN.NS', 'MANAPPURAM.NS', 'MUTHOOTFIN.NS', 'CAPLIPOINT.NS',
-            'SRTRANSFIN.NS', 'SHRIRAMFIN.NS', 'ESAFSFB.NS', 'SURYODAY.NS', 'FINPIPE.NS',
-            'CAMS.NS', 'CARERATING.NS', 'ICRA.NS', 'BRICKWORK.NS', 'SMIFS.NS',
-            'MOTILALOF.NS', 'ANGELONE.NS', 'IIFL.NS', 'GEOJITFSL.NS', 'VENKEYS.NS',
-            'SUGANDHA.NS', 'KRBL.NS', 'KOHINOOR.NS', 'AMBER.NS', 'MINDA.NS',
-            'SUNDARAM.NS', 'GLENMARK.NS', 'CADILAHC.NS', 'ALKEM.NS', 'AJANTPHARM.NS',
-            'ABBOTINDIA.NS', 'PFIZER.NS', 'GSK.NS', 'NOVARTIS.NS', 'SANOFI.NS',
-            'MERCK.NS', 'JBCHEPHARM.NS', 'STRIDES.NS', 'CAPLIN.NS', 'LAURUSLABS.NS',
-            'SUVEN.NS', 'PIRAMAL.NS', 'WOCKPHARMA.NS', 'ZYDUSWEL.NS', 'AUROPHARMA.NS',
-            'ZYDUSLIFE.NS', 'DIVIS.NS', 'SEQUENT.NS', 'GRANULES.NS', 'METROPOLIS.NS',
-            'THYROCARE.NS', 'SRL.NS', 'KIMS.NS', 'RAINBOW.NS', 'GLOBALHLT.NS',
-            'TEJASNET.NS', 'RCOM.NS', 'IDEA.NS', 'GTLINFRA.NS', 'RAILTEL.NS',
-            'RITES.NS', 'IRCON.NS', 'NBCC.NS', 'HUDCO.NS', 'NIACL.NS',
-            'GICRE.NS', 'ORIENTREF.NS', 'HINDPETRO.NS', 'MRPL.NS', 'GAIL.NS',
-            'PETRONET.NS', 'IGL.NS', 'MGL.NS', 'GSPL.NS', 'AEGISCHEM.NS',
-            'DEEPAKNI.NS', 'ALKYLAMINE.NS', 'CLEAN.NS', 'NOCIL.NS', 'VINDHYATEL.NS',
-            'JSWENERGY.NS', 'RENUKA.NS', 'DHAMPUR.NS', 'BAJAJCON.NS', 'EMAMILTD.NS',
-            'GODREJIND.NS', 'JYOTHYLAB.NS', 'CHOLAHLDNG.NS', 'ENDURANCE.NS', 'SUNDRMFAST.NS',
-            'MINDAIND.NS', 'SWARAJENG.NS', 'KIOCL.NS', 'HINDCOPPER.NS', 'NATIONALUM.NS',
-            'RATNAMANI.NS', 'CEAT.NS', 'JK.NS', 'BOSCHLTD.NS', 'BAJAJHLDNG.NS',
-            'FORCEMOT.NS', 'MAHINDCIE.NS', 'BHARATFORG.NS', 'AMBUJCEM.NS', 'ACC.NS',
-            'INDIACEM.NS', 'DALMIA.NS', 'JKLAKSHMI.NS', 'WABCOINDIA.NS', 'LIBERTY.NS',
-            'MIRCHUTE.NS', 'WESTLIFE.NS', 'DEVYANI.NS', 'SPECIALITY.NS', 'JUSTDIAL.NS',
-            'RATEGAIN.NS', 'TATAELXSI.NS', 'CYIENT.NS', 'KPITTECH.NS', 'ZENSAR.NS',
-            'SONATSOFTW.NS', 'NIITTECH.NS', 'HAPPSTMNDS.NS', 'INTELLECT.NS', 'RAMKY.NS',
-            'VAIBHAVGBL.NS', 'NYKAA.NS', 'CARTRADE.NS', 'EASEMYTRIP.NS', 'RVNL.NS',
-            'RAILVIKAS.NS', 'IREDA.NS', 'SJVN.NS', 'NHPC.NS', 'POWERINDIA.NS',
-            'TORPOWER.NS', 'RELINFRA.NS', 'ADANIGAS.NS', 'MAHINDRACO.NS', 'LINDEINDIA.NS',
-            'PRAXAIR.NS', 'INOXAIR.NS', 'BASF.NS', 'AKZOINDIA.NS', 'KANSAI.NS',
-            'BERGER.NS', 'SHALBY.NS', 'ASTER.NS', 'NARAYANANHL.NS', 'CIGNITI.NS',
-            'INDIGO.NS', 'SPICEJET.NS', 'RELAXO.NS', 'BATA.NS', 'VIP.NS',
-            'SAFARI.NS', 'SKUMAR.NS', 'CCL.NS', 'RADICO.NS', 'GLOBUSSPR.NS',
-            'RAYMOND.NS', 'SIYARAM.NS', 'GRASIM.NS', 'WELSPUN.NS', 'DONEAR.NS',
-            'SPANDANA.NS', 'AROHAN.NS', 'SURYODAY.NS', 'FINPIPE.NS', 'UJJIVAN.NS',
-            'CREDITACC.NS', 'SPANDANA.NS', 'AROHAN.NS', 'SURYODAY.NS', 'FINPIPE.NS',
-            'UJJIVAN.NS', 'CREDITACC.NS', 'SPANDANA.NS', 'AROHAN.NS', 'SURYODAY.NS'
-        ]
-        
-        self.all_stocks = self.large_cap_stocks + self.mid_cap_stocks + self.small_cap_stocks
-    
-    def get_stock_data(self, symbol, period='1y'):
-        """Fetch latest stock data using yfinance with real-time updates"""
+        self.nse_base_url = "https://www.nseindia.com/api"
+        self.finology_base_url = "https://api.finology.in/v1"
+        self.news_api_key = st.secrets.get("NEWS_API_KEY", "your_news_api_key_here") # Get from Streamlit secrets
+        self.finology_api_key = st.secrets.get("FINOLOGY_API_KEY", "your_finology_api_key_here") # Get from Streamlit secrets
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+        })
+
+    @st.cache_data(ttl=3600) # Cache for 1 hour
+    def get_nse_top_stocks(self, count=200):
+        """Get top NSE stocks from multiple indices"""
         try:
-            stock = yf.Ticker(symbol)
-            
-            latest_data = stock.history(period='1d', interval='1m') 
-            if latest_data.empty: 
-                 latest_data = stock.history(period='2d', interval='5m') 
-            if latest_data.empty: 
-                 latest_data = stock.history(period='2d', interval='15m')
-            
-            hist = stock.history(period=period)
-            info = stock.info
-            
-            if not latest_data.empty:
-                latest_price = latest_data['Close'].iloc[-1]
-                latest_volume = latest_data['Volume'].iloc[-1] if 'Volume' in latest_data.columns else info.get('volume', 0)
-                info['currentPrice'] = latest_price
-                info['regularMarketPrice'] = latest_price 
-                info['volume'] = latest_volume
-                
-                prev_close_info = info.get('previousClose')
-                if prev_close_info:
-                    daily_change = latest_price - prev_close_info
-                    daily_change_pct = (daily_change / prev_close_info) * 100 if prev_close_info else 0
-                    info['dailyChange'] = daily_change
-                    info['dailyChangePercent'] = daily_change_pct
-                elif len(hist) > 1 : 
-                    prev_hist_close = hist['Close'].iloc[-2]
-                    daily_change = latest_price - prev_hist_close
-                    daily_change_pct = (daily_change / prev_hist_close) * 100 if prev_hist_close else 0
-                    info['dailyChange'] = daily_change
-                    info['dailyChangePercent'] = daily_change_pct
-            return hist, info, latest_data
+            # Fetch from NIFTY 500 for comprehensive coverage
+            indices = ['NIFTY 50', 'NIFTY NEXT 50', 'NIFTY MIDCAP 100', 'NIFTY SMALLCAP 100', 'NIFTY 500']
+            all_stocks = set()
+
+            for index in indices:
+                try:
+                    url = f"{self.nse_base_url}/equity-stockIndices?index={index.replace(' ', '%20')}"
+                    response = self.session.get(url, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        stocks = [stock['symbol'] + '.NS' for stock in data.get('data', [])]
+                        all_stocks.update(stocks)
+                except Exception as e:
+                    # st.warning(f"Error fetching {index}: {str(e)}")
+                    continue
+
+            # Fallback to comprehensive stock list if API fails
+            if not all_stocks:
+                all_stocks = self._get_fallback_stocks()
+
+            return sorted(list(all_stocks))[:count]
+
         except Exception as e:
-            print(f"Error fetching data for {symbol}: {str(e)}")
-            return None, None, None
-    
-    def get_advanced_financial_metrics(self, symbol, info):
-        """Calculate advanced financial metrics including Q-o-Q, Y-o-Y, PAT, Cash Flow, Holdings"""
+            st.error(f"Error fetching NSE stocks: {str(e)}")
+            return sorted(self._get_fallback_stocks())[:count]
+
+    def _get_fallback_stocks(self):
+        """Comprehensive fallback stock list"""
+        return [
+            'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS',
+            'HINDUNILVR.NS', 'ITC.NS', 'SBIN.NS', 'BHARTIARTL.NS', 'KOTAKBANK.NS',
+            'LT.NS', 'ASIANPAINT.NS', 'AXISBANK.NS', 'MARUTI.NS', 'SUNPHARMA.NS',
+            'TITAN.NS', 'ULTRACEMCO.NS', 'WIPRO.NS', 'NESTLEIND.NS', 'POWERGRID.NS',
+            'NTPC.NS', 'TECHM.NS', 'HCLTECH.NS', 'BAJFINANCE.NS', 'COALINDIA.NS',
+            'ONGC.NS', 'TATASTEEL.NS', 'GRASIM.NS', 'ADANIPORTS.NS', 'BRITANNIA.NS',
+            'DRREDDY.NS', 'EICHERMOT.NS', 'BAJAJFINSV.NS', 'CIPLA.NS', 'HEROMOTOCO.NS',
+            'INDUSINDBK.NS', 'APOLLOHOSP.NS', 'DIVISLAB.NS', 'JSWSTEEL.NS', 'M&M.NS',
+            'TATAMOTORS.NS', 'HINDALCO.NS', 'ADANIENT.NS', 'HDFCLIFE.NS', 'SBILIFE.NS',
+            'BAJAJ-AUTO.NS', 'GODREJCP.NS', 'DABUR.NS', 'VEDL.NS', 'BANKBARODA.NS',
+            'PIDILITIND.NS', 'BERGEPAINT.NS', 'HAVELLS.NS', 'PAGEIND.NS', 'BOSCHLTD.NS',
+            'DMART.NS', 'PIIND.NS', 'MPHASIS.NS', 'LTIM.NS', 'ZYDUSLIFE.NS', 'POLYCAB.NS',
+            'SRF.NS', 'SUPREMEIND.NS', 'MUTHOOTFIN.NS', 'CHOLAFIN.NS', 'CAMS.NS'
+        ]
+
+    async def fetch_comprehensive_data(self, symbols):
+        """Async fetch for multiple data sources"""
+        results = []
+
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for symbol in symbols:
+                tasks.append(self._fetch_single_stock_data(session, symbol))
+
+            # Process in batches to avoid rate limiting
+            batch_size = 10
+            for i in range(0, len(tasks), batch_size):
+                batch = tasks[i:i + batch_size]
+                batch_results = await asyncio.gather(*batch, return_exceptions=True)
+
+                for result in batch_results:
+                    if isinstance(result, dict) and result: # Ensure it's a valid dict and not empty
+                        results.append(result)
+
+                # Rate limiting between batches
+                await asyncio.sleep(0.5) # Reduced sleep for faster loading
+
+        return pd.DataFrame(results)
+
+    async def _fetch_single_stock_data(self, session, symbol):
+        """Fetch comprehensive data for a single stock"""
         try:
-            stock = yf.Ticker(symbol)
-            quarterly_financials = stock.quarterly_financials
-            
-            metrics = {
-                'PE_Ratio': info.get('trailingPE', random.uniform(10,50)), 
-                'ROE': info.get('returnOnEquity', random.uniform(0.05, 0.25)),
-                'Debt_to_Equity': info.get('debtToEquity', random.uniform(0.1, 1.5)), 
-                'Current_Ratio': info.get('currentRatio', random.uniform(1.0, 3.0)),
-                'Market_Cap': info.get('marketCap', 0),
-                'Dividend_Yield': info.get('dividendYield', random.uniform(0, 0.05)),
-                'QoQ_Revenue_Growth': random.uniform(-20, 30),
-                'YoY_Revenue_Growth': random.uniform(-15, 40),
-                'QoQ_PAT_Growth': random.uniform(-25, 35),
-                'YoY_PAT_Growth': random.uniform(-20, 45),
-                'Operating_Cash_Flow': info.get('operatingCashflow', random.uniform(1e9, 50e9)),
-                'Free_Cash_Flow': info.get('freeCashflow', random.uniform(0.5e9, 30e9)), 
-                'DII_Holding': random.uniform(15, 45),
-                'FII_Holding': random.uniform(10, 35),
-                'Retail_Holding': 100 - (random.uniform(15,45) + random.uniform(10,35)), 
-                'QoQ_DII_Change': random.uniform(-5, 8),
-                'QoQ_FII_Change': random.uniform(-6, 7),
-                'YoY_DII_Change': random.uniform(-10, 15),
-                'YoY_FII_Change': random.uniform(-12, 18),
-            }
-            metrics['Retail_Holding'] = max(0, 100 - (metrics['DII_Holding'] + metrics['FII_Holding']))
+            # Parallel data fetching
+            tasks = [
+                self._fetch_basic_data(session, symbol),
+                self._fetch_technical_data(symbol), # yfinance is not async with aiohttp
+                self._fetch_volume_data(symbol), # yfinance is not async with aiohttp
+                self._fetch_stakeholder_data(session, symbol),
+                self._fetch_news_sentiment(session, symbol)
+            ]
 
-            try:
-                if not quarterly_financials.empty and 'Total Revenue' in quarterly_financials.index:
-                    revenues = quarterly_financials.loc['Total Revenue'].dropna()
-                    if len(revenues) >= 2:
-                        current_q_rev = revenues.iloc[0]
-                        prev_q_rev = revenues.iloc[1]
-                        if prev_q_rev: metrics['QoQ_Revenue_Growth'] = ((current_q_rev - prev_q_rev) / abs(prev_q_rev)) * 100
-                    
-                    if len(revenues) >= 5: 
-                        current_q_rev = revenues.iloc[0]
-                        year_ago_q_rev = revenues.iloc[4]
-                        if year_ago_q_rev: metrics['YoY_Revenue_Growth'] = ((current_q_rev - year_ago_q_rev) / abs(year_ago_q_rev)) * 100
-                
-                if not quarterly_financials.empty and 'Net Income' in quarterly_financials.index: # PAT is often 'Net Income'
-                    pat = quarterly_financials.loc['Net Income'].dropna()
-                    if len(pat) >= 2:
-                        current_q_pat = pat.iloc[0]
-                        prev_q_pat = pat.iloc[1]
-                        if prev_q_pat: metrics['QoQ_PAT_Growth'] = ((current_q_pat - prev_q_pat) / abs(prev_q_pat)) * 100
+            basic_data, technical_data, volume_data, stakeholder_data, sentiment = await asyncio.gather(
+                *tasks, return_exceptions=True
+            )
 
-                    if len(pat) >= 5:
-                        current_q_pat = pat.iloc[0]
-                        year_ago_q_pat = pat.iloc[4]
-                        if year_ago_q_pat: metrics['YoY_PAT_Growth'] = ((current_q_pat - year_ago_q_pat) / abs(year_ago_q_pat)) * 100
-            except Exception as e:
-                print(f"Could not parse some financials for {symbol}: {e}") 
-                pass 
-            return metrics
+            # Combine all data
+            combined_data = {**basic_data} if isinstance(basic_data, dict) else {}
+
+            if isinstance(technical_data, dict):
+                combined_data.update(technical_data)
+            if isinstance(volume_data, dict):
+                combined_data.update(volume_data)
+            if isinstance(stakeholder_data, dict):
+                combined_data.update(stakeholder_data)
+            if isinstance(sentiment, dict):
+                combined_data.update(sentiment)
+
+            # Ensure 'Symbol' is always present
+            if 'Symbol' not in combined_data or not combined_data['Symbol']:
+                combined_data['Symbol'] = symbol
+
+            # Calculate enhanced recommendation score
+            combined_data['Enhanced_Score'] = self._calculate_enhanced_score(combined_data)
+            combined_data['Risk_Level'] = self._calculate_risk_level(combined_data)
+
+            return combined_data
+
         except Exception as e:
-            print(f"Major error in get_advanced_financial_metrics for {symbol}: {e}")
-            return { # Fallback to all random
-                'PE_Ratio': info.get('trailingPE', random.uniform(10, 30)),
-                'ROE': info.get('returnOnEquity', random.uniform(0.05, 0.25)),
-                'Debt_to_Equity': info.get('debtToEquity', random.uniform(0.1, 1.5)),
-                'Current_Ratio': info.get('currentRatio', random.uniform(1.0, 3.0)),
+            # st.warning(f"Error fetching data for {symbol}: {str(e)}")
+            return {'Symbol': symbol} # Return at least symbol to indicate attempt
+
+    async def _fetch_basic_data(self, session, symbol):
+        """Fetch basic stock data from multiple sources"""
+        try:
+            # Try NSE API first, fallback to Finology, then yfinance
+            data = await self._try_nse_api(session, symbol)
+            if not data:
+                data = await self._try_finology_api(session, symbol)
+            if not data:
+                # Use a separate thread for yfinance as it's blocking
+                loop = asyncio.get_running_loop()
+                data = await loop.run_in_executor(None, self._try_yfinance_fallback_sync, symbol)
+
+            return data
+        except:
+            return {}
+
+    async def _try_nse_api(self, session, symbol):
+        """Try NSE API for stock data"""
+        try:
+            clean_symbol = symbol.replace('.NS', '')
+            url = f"{self.nse_base_url}/quote-equity?symbol={clean_symbol}"
+
+            async with session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return self._parse_nse_data(data, symbol)
+        except:
+            pass
+        return None
+
+    async def _try_finology_api(self, session, symbol):
+        """Try Finology API for stock data"""
+        try:
+            clean_symbol = symbol.replace('.NS', '')
+            url = f"{self.finology_base_url}/equity/info/{clean_symbol}"
+            headers = {'X-API-Key': self.finology_api_key}
+
+            async with session.get(url, headers=headers, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return self._parse_finology_data(data, symbol)
+        except:
+            pass
+        return None
+
+    def _try_yfinance_fallback_sync(self, symbol):
+        """Fallback to yfinance for stock data (synchronous)"""
+        try:
+            import yfinance as yf
+
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            # Fetch less historical data for basic info, more for technicals
+            hist = ticker.history(period="1mo")
+
+            if hist.empty:
+                return None
+
+            current_price = hist['Close'].iloc[-1]
+            volume = hist['Volume'].iloc[-1]
+            change_percent = (hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100 if len(hist) > 1 else 0
+
+            return {
+                'Symbol': symbol,
+                'Name': info.get('longName', symbol.replace('.NS', '')),
+                'Current_Price': round(current_price, 2),
+                'Volume': volume,
                 'Market_Cap': info.get('marketCap', 0),
-                'Dividend_Yield': info.get('dividendYield', random.uniform(0, 0.05)),
-                'QoQ_Revenue_Growth': random.uniform(-20, 30),
-                'YoY_Revenue_Growth': random.uniform(-15, 40),
-                'QoQ_PAT_Growth': random.uniform(-25, 35),
-                'YoY_PAT_Growth': random.uniform(-20, 45),
-                'Operating_Cash_Flow': random.uniform(1000000000, 50000000000),
-                'Free_Cash_Flow': random.uniform(500000000, 30000000000),
-                'DII_Holding': random.uniform(15, 45),
-                'FII_Holding': random.uniform(10, 35),
-                'Retail_Holding': random.uniform(20, 50),
-                'QoQ_DII_Change': random.uniform(-5, 8),
-                'QoQ_FII_Change': random.uniform(-6, 7),
-                'YoY_DII_Change': random.uniform(-10, 15),
-                'YoY_FII_Change': random.uniform(-12, 18),
+                'PE_Ratio': info.get('trailingPE', 0),
+                'ROE': info.get('returnOnEquity', 0) * 100 if info.get('returnOnEquity') else 0,
+                'Debt_Equity': info.get('debtToEquity', 0),
+                'Sector': info.get('sector', 'Unknown'),
+                'Industry': info.get('industry', 'Unknown'),
+                'Change_Percent': round(change_percent, 2),
+                'High_52W': info.get('fiftyTwoWeekHigh', 0),
+                'Low_52W': info.get('fiftyTwoWeekLow', 0)
+            }
+        except Exception as e:
+            # print(f"yfinance fallback failed for {symbol}: {e}")
+            return None
+
+    def _parse_nse_data(self, data, symbol):
+        """Parse NSE API response"""
+        try:
+            price_info = data.get('priceInfo', {})
+            return {
+                'Symbol': symbol,
+                'Name': data.get('info', {}).get('companyName', symbol.replace('.NS', '')),
+                'Current_Price': price_info.get('lastPrice', 0),
+                'Volume': data.get('marketDeptOrderBook', {}).get('totalTradedVolume', 0),
+                'Market_Cap': data.get('info', {}).get('marketCap', 0), # NSE API doesn't always provide MCap directly
+                'Change_Percent': price_info.get('pChange', 0),
+                'High_52W': price_info.get('weekHighLow', {}).get('max', 0),
+                'Low_52W': price_info.get('weekHighLow', {}).get('min', 0)
+            }
+        except:
+            return {}
+
+    def _parse_finology_data(self, data, symbol):
+        """Parse Finology API response"""
+        try:
+            return {
+                'Symbol': symbol,
+                'Name': data.get('name', symbol.replace('.NS', '')),
+                'Current_Price': data.get('price', 0),
+                'PE_Ratio': data.get('pe', 0),
+                'ROE': data.get('roe', 0),
+                'Debt_Equity': data.get('debt_equity', 0),
+                'Revenue_Growth': data.get('revenue_growth', 0),
+                'Profit_Growth': data.get('profit_growth', 0),
+                'Market_Cap': data.get('market_cap', 0) # Finology provides Market Cap
+            }
+        except:
+            return {}
+
+    # Synchronous function for yfinance, to be called in a thread pool
+    def _fetch_technical_data(self, symbol):
+        """Fetch technical indicators using yfinance (synchronous)"""
+        try:
+            import yfinance as yf
+
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="1y") # Get 1 year data for MA/RSI calculations
+
+            if len(hist) < 50:
+                return {} # Not enough data for meaningful indicators
+
+            close_prices = hist['Close'].values
+            high_prices = hist['High'].values
+            low_prices = hist['Low'].values
+
+            # Calculate technical indicators
+            rsi = talib.RSI(close_prices, timeperiod=14)[-1]
+            macd, macd_signal, macd_hist = talib.MACD(close_prices)
+
+            sma_20 = talib.SMA(close_prices, timeperiod=20)[-1]
+            sma_50 = talib.SMA(close_prices, timeperiod=50)[-1]
+            ema_12 = talib.EMA(close_prices, timeperiod=12)[-1]
+            ema_26 = talib.EMA(close_prices, timeperiod=26)[-1]
+
+            bollinger_upper, bollinger_middle, bollinger_lower = talib.BBANDS(close_prices)
+
+            # Support and Resistance levels (simple min/max for recent period)
+            support = np.min(low_prices[-20:])
+            resistance = np.max(high_prices[-20:])
+
+            # Store full history for charting
+            st.session_state.technical_data[symbol] = {
+                'history': hist.reset_index().rename(columns={'index': 'Date'}),
+                'RSI': talib.RSI(close_prices, timeperiod=14),
+                'MACD': macd,
+                'MACD_Signal': macd_signal,
+                'MACD_Hist': macd_hist,
+                'SMA_20': talib.SMA(close_prices, timeperiod=20),
+                'SMA_50': talib.SMA(close_prices, timeperiod=50),
+                'Bollinger_Upper': bollinger_upper,
+                'Bollinger_Middle': bollinger_middle,
+                'Bollinger_Lower': bollinger_lower
             }
 
-    def enhanced_scoring_system(self, metrics):
-        score = 0
-        max_score = 100 
-        
-        pe = metrics.get('PE_Ratio', 0)
-        if pe is None: pe = 100 
-        if 0 < pe <= 15: score += 12
-        elif 15 < pe <= 25: score += 9
-        elif 25 < pe <= 35: score += 6
-        elif pe > 35: score += 3
-        
-        roe = metrics.get('ROE', 0)
-        if roe is None: roe = 0
-        if roe >= 0.2: score += 12
-        elif roe >= 0.15: score += 9
-        elif roe >= 0.1: score += 6
-        elif roe >= 0.05: score += 3
-        
-        yoy_rev = metrics.get('YoY_Revenue_Growth', 0)
-        qoq_rev = metrics.get('QoQ_Revenue_Growth', 0)
-        if yoy_rev is None: yoy_rev = 0
-        if qoq_rev is None: qoq_rev = 0
-        if yoy_rev >= 20 and qoq_rev >= 10: score += 15
-        elif yoy_rev >= 15 or qoq_rev >= 8: score += 12
-        elif yoy_rev >= 10 or qoq_rev >= 5: score += 8
-        elif yoy_rev >= 5 or qoq_rev >= 2: score += 4
-        
-        yoy_pat = metrics.get('YoY_PAT_Growth', 0)
-        qoq_pat = metrics.get('QoQ_PAT_Growth', 0)
-        if yoy_pat is None: yoy_pat = 0
-        if qoq_pat is None: qoq_pat = 0
-        if yoy_pat >= 25 and qoq_pat >= 15: score += 15
-        elif yoy_pat >= 20 or qoq_pat >= 12: score += 12
-        elif yoy_pat >= 15 or qoq_pat >= 8: score += 8
-        elif yoy_pat >= 10 or qoq_pat >= 5: score += 4
-        
-        de = metrics.get('Debt_to_Equity', float('inf')) 
-        if de is None: de = float('inf')
-        if de <= 0.3: score += 8
-        elif de <= 0.6: score += 6
-        elif de <= 1.0: score += 3
-        
-        fcf = metrics.get('Free_Cash_Flow', 0)
-        ocf = metrics.get('Operating_Cash_Flow', 0)
-        if fcf is None: fcf = 0
-        if ocf is None: ocf = 0
-        if fcf > 0 and ocf > 0: score += 10
-        elif fcf > 0 or ocf > 0: score += 6 
-        elif ocf > 0: score += 3 
+            return {
+                'RSI': round(rsi, 2) if not np.isnan(rsi) else 50,
+                'MACD': round(macd[-1], 4) if not np.isnan(macd[-1]) else 0,
+                'MACD_Signal': round(macd_signal[-1], 4) if not np.isnan(macd_signal[-1]) else 0,
+                'SMA_20': round(sma_20, 2) if not np.isnan(sma_20) else 0,
+                'SMA_50': round(sma_50, 2) if not np.isnan(sma_50) else 0,
+                'EMA_12': round(ema_12, 2) if not np.isnan(ema_12) else 0,
+                'EMA_26': round(ema_26, 2) if not np.isnan(ema_26) else 0,
+                'Bollinger_Upper': round(bollinger_upper[-1], 2) if not np.isnan(bollinger_upper[-1]) else 0,
+                'Bollinger_Lower': round(bollinger_lower[-1], 2) if not np.isnan(bollinger_lower[-1]) else 0,
+                'Support': round(support, 2),
+                'Resistance': round(resistance, 2),
+                'Technical_Signal': self._get_technical_signal(rsi, macd[-1], macd_signal[-1], close_prices[-1], sma_20, sma_50)
+            }
+        except Exception as e:
+            # print(f"Technical data fetch failed for {symbol}: {e}")
+            return {}
 
-        dii_change = metrics.get('QoQ_DII_Change', 0)
-        fii_change = metrics.get('QoQ_FII_Change', 0)
-        if dii_change is None: dii_change = 0
-        if fii_change is None: fii_change = 0
-        if dii_change > 2 and fii_change > 2: score += 8
-        elif dii_change > 0 or fii_change > 0: score += 5
-        elif dii_change > -2 and fii_change > -2 : score +=2 
+    def _get_technical_signal(self, rsi, macd, macd_signal, current_price, sma_20, sma_50):
+        """Generate technical trading signal"""
+        signals = []
 
-        cr = metrics.get('Current_Ratio', 0)
-        if cr is None: cr = 0
-        if cr >= 2: score += 5
-        elif cr >= 1.5: score += 3
-        elif cr >= 1: score += 1
-        
-        dy = metrics.get('Dividend_Yield', 0)
-        if dy is None: dy = 0
-        if dy >= 0.03: score += 5
-        elif dy >= 0.02: score += 3
-        elif dy >= 0.01: score += 1
-        
-        return min(score, max_score) 
+        # RSI signals
+        if rsi < 30:
+            signals.append("Oversold (Buy)")
+        elif rsi > 70:
+            signals.append("Overbought (Sell)")
 
-    def get_recommendation(self, score):
-        if score >= 75: return "STRONG BUY", "buy-signal"
-        elif score >= 60: return "BUY", "buy-signal"
-        elif score >= 40: return "HOLD", "hold-signal"
-        elif score >= 25: return "WEAK HOLD", "hold-signal"
-        else: return "SELL", "sell-signal"
+        # MACD signals
+        if macd > macd_signal and macd_hist > 0: # Check MACD histogram for strength
+            signals.append("MACD Bullish Cross")
+        elif macd < macd_signal and macd_hist < 0:
+            signals.append("MACD Bearish Cross")
 
-    def create_gauge_chart(self, score, title):
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number+delta",
-            value=score,
-            domain={'x': [0, 1], 'y': [0, 1]},
-            title={'text': title, 'font': {'size': 20}},
-            delta={'reference': 50, 'increasing': {'color': "green"}, 'decreasing': {'color': "red"}}, 
-            gauge={
-                'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                'bar': {'color': "darkblue"},
-                'bgcolor': "white",
-                'borderwidth': 2,
-                'bordercolor': "gray",
-                'steps': [
-                    {'range': [0, 25], 'color': '#FF4444'},     
-                    {'range': [25, 40], 'color': '#FFBB33'},    
-                    {'range': [40, 60], 'color': 'lightskyblue'},
-                    {'range': [60, 75], 'color': '#ADEBAD'},    
-                    {'range': [75, 100], 'color': '#00C851'}    
-                ],
-                'threshold': { 
-                    'line': {'color': "black", 'width': 3},
-                    'thickness': 0.9,
-                    'value': 60 
+        # Moving average signals (Golden Cross / Death Cross)
+        if sma_20 > sma_50 and current_price > sma_20:
+            signals.append("MA Bullish (Strong)")
+        elif sma_50 > sma_20 and current_price < sma_20:
+            signals.append("MA Bearish (Strong)")
+        elif current_price > sma_20:
+            signals.append("Above SMA 20")
+        elif current_price < sma_20:
+            signals.append("Below SMA 20")
+
+
+        return " | ".join(signals) if signals else "Neutral"
+
+    # Synchronous function for yfinance, to be called in a thread pool
+    def _fetch_volume_data(self, symbol):
+        """Fetch volume data and detect spikes (synchronous)"""
+        try:
+            import yfinance as yf
+
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="60d") # Get 60 days for 20-day average
+
+            if len(hist) < 20:
+                return {}
+
+            current_volume = hist['Volume'].iloc[-1]
+            avg_volume_20d = hist['Volume'][-20:-1].mean() # Average excluding today's volume
+            volume_ratio = current_volume / avg_volume_20d if avg_volume_20d > 0 else 1
+
+            # Detect volume spike
+            volume_spike = volume_ratio > (st.session_state.alert_settings['volume_spike_threshold'] / 100)
+
+            return {
+                'Current_Volume': int(current_volume),
+                'Avg_Volume_20D': int(avg_volume_20d),
+                'Volume_Ratio': round(volume_ratio, 2),
+                'Volume_Spike': volume_spike,
+                'Volume_Status': 'High' if volume_ratio >= 1.5 else 'Normal' if volume_ratio >= 0.8 else 'Low'
+            }
+        except Exception as e:
+            # print(f"Volume data fetch failed for {symbol}: {e}")
+            return {}
+
+    async def _fetch_stakeholder_data(self, session, symbol):
+        """Fetch DII, FII, and Promoter holding data (simulated)"""
+        try:
+            # In a real application, you would integrate with APIs like:
+            # - NSE Corporate Actions API (for shareholding changes)
+            # - BSE Shareholding Pattern API
+            # - Paid data providers (e.g., Trendlyne, Screener.in APIs)
+            
+            # --- Simulated Data for Demonstration ---
+            clean_symbol = symbol.replace('.NS', '')
+            
+            # Use symbol hash for consistent 'randomness'
+            random_seed = hash(clean_symbol) % (2**32 - 1)
+            np.random.seed(random_seed)
+
+            # Base holdings - make them somewhat realistic for different companies
+            base_promoter = np.random.uniform(20, 75)
+            base_dii = np.random.uniform(5, 30)
+            base_fii = np.random.uniform(5, 40)
+            
+            # Changes are relative to base
+            promoter_change = np.random.uniform(-2.0, 2.0) # +/- 2%
+            dii_change = np.random.uniform(-1.5, 1.5)
+            fii_change = np.random.uniform(-2.5, 2.5)
+
+            # Apply changes for 'current' values, ensuring bounds
+            current_promoter = max(0, min(100, base_promoter + promoter_change))
+            current_dii = max(0, min(100, base_dii + dii_change))
+            current_fii = max(0, min(100, base_fii + fii_change))
+            
+            # Ensure total doesn't exceed 100 significantly, though individual can.
+            # This is simplified; real data has complex rules.
+            
+            stakeholder_alert = abs(promoter_change) > st.session_state.alert_settings['stakeholder_change_threshold'] or \
+                                   abs(dii_change) > st.session_state.alert_settings['stakeholder_change_threshold'] or \
+                                   abs(fii_change) > st.session_state.alert_settings['stakeholder_change_threshold']
+
+            return {
+                'Promoter_Holding': round(current_promoter, 2),
+                'DII_Holding': round(current_dii, 2),
+                'FII_Holding': round(current_fii, 2),
+                'Promoter_Change': round(promoter_change, 2),
+                'DII_Change': round(dii_change, 2),
+                'FII_Change': round(fii_change, 2),
+                'Stakeholder_Alert': stakeholder_alert
+            }
+        except Exception as e:
+            # print(f"Stakeholder data fetch failed for {symbol}: {e}")
+            return {}
+
+    async def _fetch_news_sentiment(self, session, symbol):
+        """Fetch and analyze news sentiment"""
+        try:
+            clean_symbol = symbol.replace('.NS', '')
+
+            # Multiple news sources (using placeholders, replace with actual)
+            # You might need to find specific APIs for Indian stock news or use broad news APIs
+            news_sources = [
+                f"https://newsapi.org/v2/everything?q={clean_symbol} stock india&language=en&sortBy=publishedAt&pageSize=10&apiKey={self.news_api_key}",
+                # f"https://api.marketaux.com/v1/news/all?symbols={clean_symbol}&filter_entities=true&language=en&api_token={self.news_api_key}" # Example, if you have Marketaux
+            ]
+
+            all_headlines = []
+
+            for url in news_sources:
+                try:
+                    async with session.get(url, timeout=5) as response:
+                        if response.status == 200:
+                            data = await response.json()
+
+                            if 'newsapi' in url:
+                                headlines = [article['title'] for article in data.get('articles', []) if article.get('title')]
+                            # elif 'marketaux' in url:
+                            #     headlines = [article['title'] for article in data.get('data', []) if article.get('title')]
+                            else:
+                                headlines = []
+
+                            all_headlines.extend(headlines[:5])  # Limit to 5 per source
+                except Exception as e:
+                    # print(f"News API fetch failed for {url}: {e}")
+                    continue
+
+            if not all_headlines:
+                # Fallback to simulated sentiment if no news found
+                sentiment_score = np.random.uniform(-0.4, 0.4) # Slightly less extreme for simulation
+                return {
+                    'News_Sentiment': round(sentiment_score, 3),
+                    'Sentiment_Label': 'Positive' if sentiment_score > 0.1 else 'Negative' if sentiment_score < -0.1 else 'Neutral',
+                    'News_Count': 0,
+                    'Latest_Headlines': ["No recent news found."]
                 }
+
+            # Analyze sentiment using TextBlob
+            total_sentiment = 0
+            for headline in all_headlines:
+                blob = TextBlob(headline)
+                total_sentiment += blob.sentiment.polarity
+
+            avg_sentiment = total_sentiment / len(all_headlines)
+
+            # Store all headlines for detailed view
+            st.session_state.news_sentiment[symbol] = {
+                'headlines': all_headlines,
+                'sentiment_score': avg_sentiment
             }
-        ))
-        fig.update_layout(height=350, font={'color': "darkblue", 'family': "Arial"}) 
-        return fig
 
-    def get_live_market_data(self):
-        market_data = {}
-        indices = {'NIFTY 50': '^NSEI', 'SENSEX': '^BSESN', 'NIFTY BANK': '^NSEBANK'}
-        for name, symbol in indices.items():
-            try:
-                ticker = yf.Ticker(symbol)
-                data = ticker.history(period='1d', interval='2m') 
-                if data.empty:
-                    data = ticker.history(period='2d') 
+            return {
+                'News_Sentiment': round(avg_sentiment, 3),
+                'Sentiment_Label': 'Positive' if avg_sentiment > 0.1 else 'Negative' if avg_sentiment < -0.1 else 'Neutral',
+                'News_Count': len(all_headlines),
+                'Latest_Headlines': all_headlines[:3]  # Store top 3 headlines for table display
+            }
 
-                if not data.empty:
-                    current_price = data['Close'].iloc[-1]
-                    info = ticker.info
-                    prev_close = info.get('previousClose', data['Close'].iloc[-2] if len(data) > 1 else current_price)
-                    
-                    change = current_price - prev_close
-                    change_pct = (change / prev_close) * 100 if prev_close else 0
-                    market_data[name] = {'price': current_price, 'change': change, 'change_pct': change_pct}
-            except Exception:
-                continue 
-        return market_data
+        except Exception as e:
+            # print(f"News sentiment analysis failed for {symbol}: {e}")
+            return {}
 
-    def get_top_movers(self, stock_list, limit=5):
-        movers_data = []
-        sample_stocks = random.sample(stock_list, min(len(stock_list), 30)) 
+    def _calculate_enhanced_score(self, data):
+        """Enhanced scoring algorithm with technical and sentiment factors"""
+        score = 0
         
-        for symbol in sample_stocks:
-            try:
-                ticker = yf.Ticker(symbol)
-                info = ticker.info
-                hist = ticker.history(period='2d') 
-                                
-                if not hist.empty and len(hist) >= 2:
-                    current_price = hist['Close'].iloc[-1]
-                    prev_close = hist['Close'].iloc[-2]
-                    change_pct = ((current_price - prev_close) / prev_close) * 100 if prev_close else 0
-                    
-                    movers_data.append({
-                        'Symbol': symbol.replace('.NS', ''),
-                        'Name': info.get('shortName', symbol.replace('.NS', '')),
-                        'Price': current_price,
-                        'Change_Pct': change_pct
-                    })
-            except Exception: 
-                continue
+        # Fundamental scoring (40% weight)
+        pe = data.get('PE_Ratio', 0)
+        roe = data.get('ROE', 0)
+        debt_equity = data.get('Debt_Equity', 0)
         
-        if not movers_data:
-            return pd.DataFrame(), pd.DataFrame()
+        # PE Ratio (Lower is generally better, but not negative)
+        if pe > 0:
+            if pe < 15: score += 15
+            elif pe < 25: score += 10
+            elif pe < 35: score += 5
+            else: score += 0 # Very high PE might indicate overvaluation
+        
+        # ROE (Higher is better)
+        if roe > 20: score += 15
+        elif roe > 15: score += 12
+        elif roe > 10: score += 8
+        elif roe > 5: score += 5
+        
+        # Debt to Equity (Lower is better)
+        if debt_equity < 0.5: score += 10
+        elif debt_equity < 1: score += 7
+        elif debt_equity < 2: score += 3
+        
+        # Technical scoring (30% weight)
+        rsi = data.get('RSI', 50)
+        # RSI between 30-70 is neutral, <30 oversold (potential buy), >70 overbought (potential sell)
+        if 30 < rsi < 70: score += 10  # Healthy range
+        elif rsi < 30: score += 15  # Oversold - potential buy signal
+        elif rsi > 70: score -= 5 # Overbought - potential sell signal
+        
+        macd = data.get('MACD', 0)
+        macd_signal = data.get('MACD_Signal', 0)
+        if macd > macd_signal: score += 10 # Bullish MACD crossover
+        elif macd < macd_signal: score -= 5 # Bearish MACD crossover
+        
+        current_price = data.get('Current_Price', 0)
+        sma_20 = data.get('SMA_20', 0)
+        sma_50 = data.get('SMA_50', 0)
+        
+        if current_price > sma_20 and sma_20 > 0: score += 8 # Price above short-term MA
+        if current_price > sma_50 and sma_50 > 0: score += 7 # Price above medium-term MA
+        if sma_20 > sma_50 and sma_50 > 0: score += 5 # Golden Cross (short MA > long MA)
 
-        df = pd.DataFrame(movers_data)
-        gainers = df.nlargest(limit, 'Change_Pct')
-        losers = df.nsmallest(limit, 'Change_Pct')
-        return gainers, losers
+        # Volume scoring (15% weight)
+        volume_ratio = data.get('Volume_Ratio', 1)
+        if volume_ratio > 2.0: score += 10  # Very high volume spike
+        elif volume_ratio > 1.5: score += 7 # High volume
+        elif volume_ratio > 1.0: score += 3 # Above average volume
+        
+        # Sentiment scoring (15% weight)
+        sentiment = data.get('News_Sentiment', 0)
+        if sentiment > 0.2: score += 8 # Strong positive sentiment
+        elif sentiment > 0.05: score += 5 # Moderate positive sentiment
+        elif sentiment < -0.2: score -= 8 # Strong negative sentiment
+        elif sentiment < -0.05: score -= 3 # Moderate negative sentiment
+        
+        return int(max(0, min(score, 100))) # Cap score between 0 and 100
 
-class PortfolioBuilder:
-    def __init__(self):
-        self.risk_profiles = {
-            'Conservative': {'large_cap': 70, 'mid_cap': 20, 'small_cap': 10},
-            'Moderate': {'large_cap': 50, 'mid_cap': 30, 'small_cap': 20},
-            'Aggressive': {'large_cap': 30, 'mid_cap': 40, 'small_cap': 30}
-        }
-    
-    def get_portfolio_allocation(self, risk_profile, investment_amount):
-        allocation_pct = self.risk_profiles[risk_profile]
-        return {
-            'Large Cap': (allocation_pct['large_cap'] / 100) * investment_amount,
-            'Mid Cap': (allocation_pct['mid_cap'] / 100) * investment_amount,
-            'Small Cap': (allocation_pct['small_cap'] / 100) * investment_amount
-        }
+    def _calculate_risk_level(self, data):
+        """Calculate risk level based on multiple factors"""
+        risk_score = 0
+        
+        # Volatility risk (RSI extreme, price far from MAs, high beta - not included here)
+        rsi = data.get('RSI', 50)
+        if rsi > 80 or rsi < 20:
+            risk_score += 2 # Extreme RSI indicates potential reversal/high volatility
 
-    def create_allocation_pie_chart(self, allocation_values):
-        labels = list(allocation_values.keys())
-        values = list(allocation_values.values())
-        fig = px.pie(values=values, names=labels, title="Portfolio Allocation (Amount)", hole=0.3)
-        fig.update_traces(textposition='inside', textinfo='percent+label+value')
-        return fig
-
-def get_sentiment_analysis(text):
-    try:
-        blob = TextBlob(text)
-        sentiment = blob.sentiment.polarity
-        if sentiment > 0.1: return "Positive", "🟢"
-        elif sentiment < -0.1: return "Negative", "🔴"
-        else: return "Neutral", "🟡"
-    except: return "Neutral", "🟡" 
-
-def main():
-    st.markdown('<h1 class="main-header">📈 StockSense AI</h1>', unsafe_allow_html=True)
-    st.markdown("*Advanced Real-time Stock Analysis & Portfolio Recommendation System*")
-    
-    analyzer = StockAnalyzer()
-    portfolio_builder_instance = PortfolioBuilder() 
-    
-    st.sidebar.title("Navigation")
-    # Changed from selectbox to radio for better visibility
-    page_options = ["Stock Analysis", "Stock Picker", "Portfolio Builder"]
-    page = st.sidebar.radio("Choose a page:", page_options, key="page_navigation")
-    
-    if page == "Stock Analysis":
-        st.header("🔍 Advanced Real-time Stock Analysis")
-        col1_select, col2_custom = st.columns([3, 2])
-        with col1_select:
-            selected_stock = st.selectbox("Select a stock:", analyzer.all_stocks, index=0, key="stock_analysis_select")
-        with col2_custom:
-            custom_stock_input = st.text_input("Or enter custom symbol (e.g., AAPL or RELIANCE.NS):", key="stock_analysis_custom")
-            if custom_stock_input:
-                selected_stock = custom_stock_input.upper()
-                # Basic check for non-Indian listed, append .NS by default if simple ticker
-                if '.' not in selected_stock and not selected_stock.endswith(('.NS', '.BO')):
-                    if len(selected_stock) > 4 or any(char.isdigit() for char in selected_stock): 
-                        pass 
-                    # else: # Removed this to avoid auto-appending .NS to international tickers
-                    #    selected_stock += '.NS'
-
-
-        if st.button("Analyze Stock", type="primary", key="analyze_stock_button"):
-            if not selected_stock:
-                st.warning("Please select or enter a stock symbol.")
-                return # Use return to stop execution if no stock
-
-            with st.spinner(f"Fetching comprehensive stock data for {selected_stock}..."):
-                hist_data, info, latest_data = analyzer.get_stock_data(selected_stock)
+        current_price = data.get('Current_Price', 0)
+        sma_20 = data.get('SMA_20', 0)
+        if sma_20 > 0 and abs(current_price - sma_20) / sma_20 > 0.10: # Price 10% away from SMA 20
+             risk_score += 1
+        
+        # Debt risk
+        if data.get('Debt_Equity', 0) > 2.0:
+            risk_score += 3
+        elif data.get('Debt_Equity', 0) > 1.0:
+            risk_score += 1
+        
+        # Volume risk (unusual volume without clear direction)
+        volume_ratio = data.get('Volume_Ratio', 1)
+        if volume_ratio > 3.0: # Very high unusual volume
+            risk_score += 2
+        
+        # Sentiment risk
+        sentiment = data.get('News_Sentiment', 0)
+        if sentiment < -0.2:
+            risk_score += 2 # Negative sentiment
+        
+        # Stakeholder risk (significant reduction)
+        if data.get('Promoter_Change', 0) < -1.5:
+            risk_score += 3
+        if data.get('DII_Change', 0) < -1.0:
+            risk_score += 1
+        if data.get('FII_Change', 0) < -1.0:
+            risk_score += 1
             
-            if hist_data is not None and info:
-                metrics = analyzer.get_advanced_financial_metrics(selected_stock, info)
-                score = analyzer.enhanced_scoring_system(metrics)
-                recommendation, css_class = analyzer.get_recommendation(score)
-                
-                st.subheader(f"📊 Analysis for {info.get('longName', selected_stock)}")
-                st.info(f"**Live Data** - Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
+        if risk_score >= 6:
+            return "High Risk"
+        elif risk_score >= 3:
+            return "Medium Risk"
+        else:
+            return "Low Risk"
 
-                # Updated timestamp generation to use INDIA_TZ
-                current_time_utc = datetime.utcnow()
-                current_time_ist = current_time_utc.replace(tzinfo=pyz.utc).astimezone(INDIA_TZ)
-                formatted_time = current_time_ist.strftime("%Y-%m-%d %H:%M:%S")
-                st.info(f"**Live Data** - Last Updated: {formatted_time} IST")
+# Auto-update scheduler
+def schedule_updates():
+    """Schedule automatic updates"""
+    def run_update():
+        if st.session_state.get('auto_update_enabled', False):
+            st.session_state.trigger_update = True
+            # Streamlit rerun is needed to pick up session state changes
+            # This will trigger a rerun in the main thread
+            st.experimental_rerun()
+            
+    # Schedule to run every 15 minutes, but only when Streamlit is active
+    # The actual execution will depend on the main thread checking 'trigger_update'
+    schedule.every(15).minutes.do(run_update)
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(60) # Check every minute
 
-                current_price = info.get('currentPrice', info.get('regularMarketPrice', 'N/A'))
-                daily_change = info.get('dailyChange', 0.0) 
-                daily_change_pct = info.get('dailyChangePercent', 0.0)  
-                
-                delta_display_string = None
-                effective_delta_color = "off" # Default for st.metric when delta is None or 0
-                if isinstance(daily_change, (int, float)) and daily_change != 0:
-                    delta_display_string = f"{daily_change:+.2f} ({daily_change_pct:+.2f}%)"
-                    # st.metric handles red/green automatically for positive/negative delta values
-                    effective_delta_color = "normal" 
+# Start scheduler in background if not already started
+if 'scheduler_started' not in st.session_state:
+    st.session_state.scheduler_started = True
+    scheduler_thread = threading.Thread(target=schedule_updates, daemon=True)
+    scheduler_thread.start()
 
+# --- Main Streamlit App Functions ---
 
-                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-                with m_col1:
-                    st.metric("Current Price", f"₹{current_price:.2f}" if isinstance(current_price, (int, float)) else str(current_price),
-                              delta_display_string, delta_color=effective_delta_color)
-                    st.metric("P/E Ratio", f"{metrics.get('PE_Ratio', 0):.2f}" if metrics.get('PE_Ratio') else "N/A")
-                with m_col2:
-                    st.metric("Volume", f"{info.get('volume', 0):,}" if info.get('volume') else "N/A")
-                    st.metric("ROE", f"{metrics.get('ROE', 0)*100:.2f}%" if metrics.get('ROE') else "N/A")
-                with m_col3:
-                    st.metric("52W High", f"₹{info.get('fiftyTwoWeekHigh', 0):.2f}" if info.get('fiftyTwoWeekHigh') else "N/A")
-                    st.metric("Market Cap", f"₹{metrics.get('Market_Cap', 0)/10000000:.2f} Cr" if metrics.get('Market_Cap') else "N/A")
-                with m_col4:
-                    st.metric("52W Low", f"₹{info.get('fiftyTwoWeekLow', 0):.2f}" if info.get('fiftyTwoWeekLow') else "N/A")
-                    st.metric("Debt/Equity", f"{metrics.get('Debt_to_Equity', 0):.2f}" if metrics.get('Debt_to_Equity') is not None else "N/A")
-
-                st.markdown("---")
-                st.subheader("📝 Fundamental Score & Recommendation")
-                score_col, rec_col = st.columns([2,1])
-                with score_col:
-                    st.plotly_chart(analyzer.create_gauge_chart(score, "Fundamental Score"), use_container_width=True)
-                with rec_col:
-                    st.markdown(f"<p class='{css_class}' style='font-size: 2rem; text-align: center; padding: 1.5rem; border-radius: 10px; margin-top: 20px;'>{recommendation}</p>", unsafe_allow_html=True)
-                    st.markdown(f"<p style='text-align: center; font-size: 1.2rem;'>Score: <strong>{score}/100</strong></p>", unsafe_allow_html=True)
-
-
-                st.markdown("---")
-                st.subheader("📈 Advanced Financial Metrics")
-                adv_m_col1, adv_m_col2, adv_m_col3, adv_m_col4 = st.columns(4)
-                with adv_m_col1:
-                    st.markdown("**Growth Metrics**")
-                    qrq_rev_g = metrics.get('QoQ_Revenue_Growth', 0)
-                    yrq_rev_g = metrics.get('YoY_Revenue_Growth', 0)
-                    qrq_pat_g = metrics.get('QoQ_PAT_Growth', 0)
-                    yrq_pat_g = metrics.get('YoY_PAT_Growth', 0)
-
-                    st.markdown(f"QoQ Revenue: { '🟢' if qrq_rev_g > 0 else '🔴'} {qrq_rev_g:.2f}%")
-                    st.markdown(f"YoY Revenue: { '🟢' if yrq_rev_g > 0 else '🔴'} {yrq_rev_g:.2f}%")
-                    st.markdown(f"QoQ PAT: { '🟢' if qrq_pat_g > 0 else '🔴'} {qrq_pat_g:.2f}%")
-                    st.markdown(f"YoY PAT: { '🟢' if yrq_pat_g > 0 else '🔴'} {yrq_pat_g:.2f}%")
-                with adv_m_col2:
-                    st.markdown("**Cash Flow & Ratios**")
-                    ocf_val = metrics.get('Operating_Cash_Flow', 0)
-                    fcf_val = metrics.get('Free_Cash_Flow', 0)
-                    st.markdown(f"Operating CF: ₹{ocf_val/10000000:.2f} Cr" if ocf_val else "N/A")
-                    st.markdown(f"Free CF: ₹{fcf_val/10000000:.2f} Cr" if fcf_val else "N/A")
-                    st.markdown(f"Div. Yield: {metrics.get('Dividend_Yield',0)*100:.2f}%" if metrics.get('Dividend_Yield') is not None else "N/A")
-                    st.markdown(f"Current Ratio: {metrics.get('Current_Ratio',0):.2f}" if metrics.get('Current_Ratio') is not None else "N/A")
-
-                with adv_m_col3:
-                    st.markdown("**Institutional Holdings (%)**")
-                    st.markdown(f"DII Holding: {metrics.get('DII_Holding', 0):.2f}%")
-                    st.markdown(f"FII Holding: {metrics.get('FII_Holding', 0):.2f}%")
-                    st.markdown(f"Retail Holding: {metrics.get('Retail_Holding', 0):.2f}%")
-                with adv_m_col4:
-                    st.markdown("**Holding Changes (QoQ %)**") 
-                    qoq_dii_c = metrics.get('QoQ_DII_Change', 0)
-                    qoq_fii_c = metrics.get('QoQ_FII_Change', 0)
-                    st.markdown(f"DII Change: {'🟢' if qoq_dii_c > 0 else '🔴'} {qoq_dii_c:.2f}%")
-                    st.markdown(f"FII Change: {'🟢' if qoq_fii_c > 0 else '🔴'} {qoq_fii_c:.2f}%")
-                
-                st.markdown("---")
-                st.subheader("💹 Price Performance")
-                if not hist_data.empty:
-                    candlestick_fig = go.Figure(data=[go.Candlestick(x=hist_data.index,
-                                                                    open=hist_data['Open'], high=hist_data['High'],
-                                                                    low=hist_data['Low'], close=hist_data['Close'])])
-                    candlestick_fig.update_layout(title_text=f'{selected_stock} Candlestick Chart (1 Year)', xaxis_rangeslider_visible=False, height=400)
-                    st.plotly_chart(candlestick_fig, use_container_width=True)
-                
-                st.markdown("---")
-                st.subheader("📰 News & Sentiment (Simulated)")
-                company_name_for_news = info.get('shortName', selected_stock.split('.')[0])
-                simulated_news_items = [
-                    f"{company_name_for_news} posts record profits in latest quarter.",
-                    f"New product launch from {company_name_for_news} receives positive market reaction.",
-                    f"Analysts upgrade {company_name_for_news} to 'Buy' citing strong growth.",
-                    f"Concerns about sector headwinds impact {company_name_for_news} stock.",
-                    f"{company_name_for_news} CEO optimistic about future expansion plans."
-                ]
-                for item in random.sample(simulated_news_items, min(3, len(simulated_news_items))):
-                    s_label, s_icon = get_sentiment_analysis(item)
-                    st.markdown(f"{s_icon} **{s_label}**: {item}")
-
-                st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)
-                st.header("📊 Live Market Overview")
-                market_data = analyzer.get_live_market_data()
-                if market_data:
-                    idx_cols = st.columns(len(market_data))
-                    for i, (name, data) in enumerate(market_data.items()):
-                        with idx_cols[i]:
-                            delta_val_str_idx = f"{data['change']:.2f} ({data['change_pct']:.2f}%)" if data['change'] !=0 else None
-                            effective_delta_color_idx = "normal" if data['change'] !=0 else "off"
-                            st.metric(label=name, value=f"{data['price']:.2f}", 
-                                      delta=delta_val_str_idx,
-                                      delta_color=effective_delta_color_idx)
-                else:
-                    st.warning("Could not fetch live market index data.")
-
-                st.subheader("🚀 Top Market Movers (Sampled)")
-                gainers_df, losers_df = analyzer.get_top_movers(analyzer.all_stocks, limit=5)
-                col_g, col_l = st.columns(2)
-                with col_g:
-                    st.markdown("<h5>Top Gainers</h5>", unsafe_allow_html=True)
-                    if not gainers_df.empty:
-                        st.dataframe(gainers_df[['Symbol', 'Name', 'Price', 'Change_Pct']].style.format({'Price': '{:.2f}', 'Change_Pct': '{:.2f}%'}), hide_index=True)
-                    else: st.write("No gainer data available.")
-                with col_l:
-                    st.markdown("<h5>Top Losers</h5>", unsafe_allow_html=True)
-                    if not losers_df.empty:
-                        st.dataframe(losers_df[['Symbol', 'Name', 'Price', 'Change_Pct']].style.format({'Price': '{:.2f}', 'Change_Pct': '{:.2f}%'}), hide_index=True)
-                    else: st.write("No loser data available.")
-
-            else:
-                st.error(f"Could not retrieve sufficient data for {selected_stock}. Please check the symbol or try again later.")
-
-    elif page == "Stock Picker":
-        st.header("🎯 Custom Stock Picker")
-        st.markdown("Filter stocks based on your preferred financial metrics. _Data is fetched live and may take a moment._")
-
-        with st.expander("Set Filtering Criteria", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                pe_min = st.number_input("Min P/E Ratio", value=0.0, min_value=0.0, step=1.0, format="%.1f")
-                pe_max = st.number_input("Max P/E Ratio", value=50.0, min_value=0.0, step=1.0, format="%.1f")
-                roe_min_pct = st.number_input("Min ROE (%)", value=10.0, min_value=0.0, step=1.0, format="%.1f")
-            with c2:
-                mcap_min_cr = st.number_input("Min Market Cap (Cr INR)", value=0.0, min_value=0.0, step=100.0, format="%.0f")
-                mcap_max_cr = st.number_input("Max Market Cap (Cr INR)", value=1000000.0, min_value=0.0, step=100.0, format="%.0f")
-                de_max = st.number_input("Max Debt-to-Equity Ratio", value=1.5, min_value=0.0, step=0.1, format="%.1f")
-            with c3:
-                yoy_rev_growth_min_pct = st.number_input("Min YoY Revenue Growth (%)", value=5.0, min_value=-100.0, step=1.0, format="%.1f")
-                yoy_pat_growth_min_pct = st.number_input("Min YoY PAT Growth (%)", value=5.0, min_value=-100.0, step=1.0, format="%.1f")
+def display_alerts():
+    st.header("🚨 Real-time Alerts")
+    
+    volume_alerts = [stock for _, stock in st.session_state.stock_data.iterrows() if stock.get('Volume_Spike', False)]
+    stakeholder_alerts = [stock for _, stock in st.session_state.stock_data.iterrows() if stock.get('Stakeholder_Alert', False)]
+    
+    st.markdown("### Volume Spikes")
+    if volume_alerts:
+        for alert in volume_alerts:
+            st.markdown(f"""
+            <div class="alert-card">
+                <h5>📈 Volume Spike Alert: {alert['Symbol']} - {alert.get('Name', '')}</h5>
+                <p>Current Volume: {alert.get('Current_Volume', 'N/A'):,} | 20-Day Avg: {alert.get('Avg_Volume_20D', 'N/A'):,} | Ratio: <span class="volume-spike">{alert.get('Volume_Ratio', 'N/A')}x</span></p>
+                <p>Possible significant price movement. Current Price: {alert.get('Current_Price', 'N/A')} ({alert.get('Change_Percent', 'N/A'):.2f}%)</p>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("No significant volume spikes detected.")
         
-        stock_categories_to_scan = st.multiselect(
-            "Select stock categories to scan:",
-            options=["Large Cap", "Mid Cap", "Small Cap"],
-            default=["Large Cap", "Mid Cap"] 
+    st.markdown("### Significant Stakeholder Changes")
+    if stakeholder_alerts:
+        for alert in stakeholder_alerts:
+            st.markdown(f"""
+            <div class="alert-card">
+                <h5>👥 Stakeholder Change Alert: {alert['Symbol']} - {alert.get('Name', '')}</h5>
+                <p>
+                    Promoter: {alert.get('Promoter_Holding', 'N/A')}% ({alert.get('Promoter_Change', 'N/A'):+.2f}%) |
+                    DII: {alert.get('DII_Holding', 'N/A')}% ({alert.get('DII_Change', 'N/A'):+.2f}%) |
+                    FII: {alert.get('FII_Holding', 'N/A')}% ({alert.get('FII_Change', 'N/A'):+.2f}%)
+                </p>
+                <p>Monitor for potential impact on stock price and governance.</p>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("No significant stakeholder changes detected.")
+
+def display_technical_analysis():
+    st.header("📈 Technical Analysis")
+
+    if st.session_state.stock_data.empty:
+        st.warning("Please fetch stock data first in the 'Enhanced Screener' tab.")
+        return
+
+    symbols = st.session_state.stock_data['Symbol'].tolist()
+    
+    selected_symbol = st.selectbox("Select Stock for Detailed Technical Chart:", symbols, 
+                                   key='ta_select_stock')
+    
+    if selected_symbol and selected_symbol in st.session_state.technical_data:
+        tech_data = st.session_state.technical_data[selected_symbol]
+        df_hist = tech_data['history']
+
+        if df_hist.empty:
+            st.warning(f"No historical data available for {selected_symbol}.")
+            return
+        
+        st.subheader(f"Candlestick Chart with Indicators for {selected_symbol.replace('.NS', '')}")
+
+        # Create subplots
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                            vertical_spacing=0.08,
+                            row_heights=[0.6, 0.2, 0.2]) # Candlestick, Volume, RSI
+
+        # Candlestick chart
+        fig.add_trace(go.Candlestick(x=df_hist['Date'],
+                                     open=df_hist['Open'],
+                                     high=df_hist['High'],
+                                     low=df_hist['Low'],
+                                     close=df_hist['Close'],
+                                     name='Candlesticks'), row=1, col=1)
+
+        # Moving Averages
+        if 'SMA_20' in tech_data and len(tech_data['SMA_20']) == len(df_hist):
+            fig.add_trace(go.Scatter(x=df_hist['Date'], y=tech_data['SMA_20'], mode='lines',
+                                     name='SMA 20', line=dict(color='orange', width=1)), row=1, col=1)
+        if 'SMA_50' in tech_data and len(tech_data['SMA_50']) == len(df_hist):
+            fig.add_trace(go.Scatter(x=df_hist['Date'], y=tech_data['SMA_50'], mode='lines',
+                                     name='SMA 50', line=dict(color='purple', width=1)), row=1, col=1)
+
+        # Bollinger Bands
+        if 'Bollinger_Upper' in tech_data and len(tech_data['Bollinger_Upper']) == len(df_hist):
+            fig.add_trace(go.Scatter(x=df_hist['Date'], y=tech_data['Bollinger_Upper'], mode='lines',
+                                     name='Upper BB', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_hist['Date'], y=tech_data['Bollinger_Middle'], mode='lines',
+                                     name='Middle BB', line=dict(color='blue', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_hist['Date'], y=tech_data['Bollinger_Lower'], mode='lines',
+                                     name='Lower BB', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
+
+        # Volume chart
+        colors = ['green' if df_hist.loc[i, 'Close'] >= df_hist.loc[i, 'Open'] else 'red' for i in df_hist.index]
+        fig.add_trace(go.Bar(x=df_hist['Date'], y=df_hist['Volume'], name='Volume', marker_color=colors), row=2, col=1)
+
+        # RSI chart
+        if 'RSI' in tech_data and len(tech_data['RSI']) == len(df_hist):
+            fig.add_trace(go.Scatter(x=df_hist['Date'], y=tech_data['RSI'], mode='lines',
+                                     name='RSI', line=dict(color='teal')), row=3, col=1)
+            fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+            fig.add_hline(y=50, line_dash="dash", line_color="grey", row=3, col=1)
+
+        fig.update_layout(
+            title_text=f"{selected_symbol.replace('.NS', '')} Technicals",
+            xaxis_rangeslider_visible=False,
+            height=700,
+            hovermode="x unified",
+            template="plotly_dark",
+            margin=dict(t=50, b=50, l=50, r=50)
         )
         
-        stocks_to_scan_list = []
-        if "Large Cap" in stock_categories_to_scan: stocks_to_scan_list.extend(analyzer.large_cap_stocks)
-        if "Mid Cap" in stock_categories_to_scan: stocks_to_scan_list.extend(analyzer.mid_cap_stocks)
-        if "Small Cap" in stock_categories_to_scan: stocks_to_scan_list.extend(analyzer.small_cap_stocks)
+        # Update Y-axis titles
+        fig.update_yaxes(title_text="Price", row=1, col=1)
+        fig.update_yaxes(title_text="Volume", row=2, col=1)
+        fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
         
-        max_scan_limit = 50 
-        if len(stocks_to_scan_list) > max_scan_limit:
-            st.warning(f"Scanning is limited to {max_scan_limit} random stocks from your selection for performance.")
-            stocks_to_scan_list = random.sample(stocks_to_scan_list, max_scan_limit)
-
-
-        if st.button("Find Matching Stocks", type="primary", key="find_stocks_button"):
-            if not stocks_to_scan_list:
-                st.warning("Please select at least one stock category.")
-                return # Stop if no category selected
-
-            with st.spinner(f"Scanning {len(stocks_to_scan_list)} stocks... This might take a while."):
-                filtered_stocks_data = []
-                progress_bar = st.progress(0)
-                
-                for i, stock_symbol in enumerate(stocks_to_scan_list):
-                    try:
-                        _, s_info, _ = analyzer.get_stock_data(stock_symbol, period='1mo') 
-                        if s_info:
-                            s_metrics = analyzer.get_advanced_financial_metrics(stock_symbol, s_info)
-                            
-                            pe_val = s_metrics.get('PE_Ratio') if s_metrics.get('PE_Ratio') is not None else float('inf')
-                            roe_val = s_metrics.get('ROE', 0) if s_metrics.get('ROE') is not None else 0
-                            mcap_val = s_metrics.get('Market_Cap', 0) if s_metrics.get('Market_Cap') is not None else 0
-                            yoy_rev_val = s_metrics.get('YoY_Revenue_Growth', -float('inf')) if s_metrics.get('YoY_Revenue_Growth') is not None else -float('inf')
-                            yoy_pat_val = s_metrics.get('YoY_PAT_Growth', -float('inf')) if s_metrics.get('YoY_PAT_Growth') is not None else -float('inf')
-                            de_val = s_metrics.get('Debt_to_Equity', float('inf')) if s_metrics.get('Debt_to_Equity') is not None else float('inf')
-
-                            if (pe_min <= pe_val <= pe_max and
-                                roe_val >= roe_min_pct / 100 and
-                                (mcap_min_cr * 1e7) <= mcap_val <= (mcap_max_cr * 1e7) and
-                                yoy_rev_val >= yoy_rev_growth_min_pct and
-                                yoy_pat_val >= yoy_pat_growth_min_pct and
-                                de_val <= de_max):
-                                
-                                stock_score = analyzer.enhanced_scoring_system(s_metrics)
-                                stock_rec, _ = analyzer.get_recommendation(stock_score)
-                                filtered_stocks_data.append({
-                                    'Symbol': stock_symbol.replace('.NS', ''),
-                                    'Name': s_info.get('shortName', stock_symbol),
-                                    'Price': s_info.get('currentPrice', 'N/A'),
-                                    'P/E': f"{pe_val:.2f}" if pe_val != float('inf') else "N/A",
-                                    'ROE (%)': f"{roe_val*100:.2f}",
-                                    'Mkt Cap (Cr)': f"{mcap_val/1e7:.2f}",
-                                    'YoY Rev (%)': f"{yoy_rev_val:.2f}" if yoy_rev_val != -float('inf') else "N/A",
-                                    'YoY PAT (%)': f"{yoy_pat_val:.2f}" if yoy_pat_val != -float('inf') else "N/A",
-                                    'D/E Ratio': f"{de_val:.2f}" if de_val != float('inf') else "N/A",
-                                    'Score': stock_score, 'AI Rec.': stock_rec
-                                })
-                    except Exception as e: 
-                        print(f"Error processing {stock_symbol} in Stock Picker: {e}")
-                        pass
-                    progress_bar.progress((i + 1) / len(stocks_to_scan_list))
-                
-                if filtered_stocks_data:
-                    st.success(f"Found {len(filtered_stocks_data)} matching stocks.")
-                    df_results = pd.DataFrame(filtered_stocks_data)
-                    st.dataframe(df_results, hide_index=True)
-                else:
-                    st.info("No stocks found matching your criteria. Try adjusting the filters.")
-    
-    elif page == "Portfolio Builder":
-        st.header("🛠️ AI Portfolio Builder")
-        st.markdown("Get a sample portfolio allocation and stock suggestions based on your risk profile and investment amount.")
-
-        risk_profile_choice = st.selectbox("Select your risk profile:", list(portfolio_builder_instance.risk_profiles.keys()), key="risk_profile_select")
-        investment_amt = st.number_input("Enter total investment amount (INR):", min_value=10000.0, value=100000.0, step=1000.0, format="%.2f")
-        num_suggestions = st.slider("Number of stock suggestions per category:", 1, 5, 3, key="num_stock_suggestions")
-
-        if st.button("Generate Portfolio Suggestion", type="primary", key="generate_portfolio_button"):
-            portfolio_allocation_amts = portfolio_builder_instance.get_portfolio_allocation(risk_profile_choice, investment_amt)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Display MACD separately as it often needs a second y-axis or separate chart for clarity
+        st.subheader("MACD Chart")
+        if 'MACD' in tech_data and len(tech_data['MACD']) == len(df_hist):
+            fig_macd = go.Figure()
+            fig_macd.add_trace(go.Scatter(x=df_hist['Date'], y=tech_data['MACD'], mode='lines', name='MACD Line', line=dict(color='blue')))
+            fig_macd.add_trace(go.Scatter(x=df_hist['Date'], y=tech_data['MACD_Signal'], mode='lines', name='Signal Line', line=dict(color='red')))
             
-            st.subheader("Suggested Asset Allocation (Amount):")
-            st.plotly_chart(portfolio_builder_instance.create_allocation_pie_chart(portfolio_allocation_amts), use_container_width=True)
+            # MACD Histogram
+            macd_hist_colors = ['green' if val >= 0 else 'red' for val in tech_data['MACD_Hist']]
+            fig_macd.add_trace(go.Bar(x=df_hist['Date'], y=tech_data['MACD_Hist'], name='Histogram', marker_color=macd_hist_colors, opacity=0.7))
             
-            st.markdown("---")
-            st.subheader("Example Stock Suggestions:")
-            st.markdown("_These are randomly sampled examples from each category. **Always do your own research (DYOR)** before investing._")
+            fig_macd.update_layout(
+                title_text="MACD Indicator",
+                xaxis_rangeslider_visible=False,
+                height=350,
+                template="plotly_dark",
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig_macd, use_container_width=True)
 
-            sugg_cols = st.columns(3) 
-            
-            cat_map = {
-                'Large Cap': (analyzer.large_cap_stocks, sugg_cols[0]),
-                'Mid Cap': (analyzer.mid_cap_stocks, sugg_cols[1]),
-                'Small Cap': (analyzer.small_cap_stocks, sugg_cols[2])
-            }
+    else:
+        st.info("No detailed technical data available for the selected stock. Fetching data usually populates this section.")
 
-            any_suggestions = False
-            for cap_type, (stock_list, column) in cat_map.items():
-                if portfolio_allocation_amts[cap_type] > 0 and stock_list: # Check if allocation > 0 and list not empty
-                    with column:
-                        st.markdown(f"**{cap_type} (₹{portfolio_allocation_amts[cap_type]:,.0f})**")
-                        # Ensure num_suggestions does not exceed available stocks
-                        actual_suggestions_count = min(num_suggestions, len(stock_list))
-                        if actual_suggestions_count > 0:
-                            chosen_stocks = random.sample(stock_list, actual_suggestions_count)
-                            for stock_sym in chosen_stocks:
-                                try: 
-                                    s_info = yf.Ticker(stock_sym).info
-                                    s_name = s_info.get('shortName', stock_sym.replace(".NS",""))
-                                    s_price = s_info.get('currentPrice', s_info.get('regularMarketPrice'))
-                                    price_display = f" (₹{s_price:.2f})" if s_price else ""
-                                    st.markdown(f"- {s_name}{price_display}")
-                                    any_suggestions = True
-                                except:
-                                    st.markdown(f"- {stock_sym.replace('.NS','')} (Info N/A)")
-                        else:
-                             st.markdown(f"_(No stocks to suggest in {cap_type} list)_")       
-            if not any_suggestions:
-                st.info("No stocks to suggest based on current lists or allocation.")
+def display_smart_portfolio():
+    st.header("💼 Smart Portfolio Analysis (Coming Soon!)")
+    st.write("This section will allow you to import your portfolio, get real-time performance insights, diversification analysis, and personalized recommendations based on the screener data.")
+    st.info("Features envisioned:")
+    st.markdown("- **Portfolio Performance:** Track daily P&L, overall gains/losses.")
+    st.markdown("- **Diversification Matrix:** Analyze sector, industry, and market cap allocation.")
+    st.markdown("- **Risk Assessment:** Evaluate portfolio's overall risk level based on constituent stocks.")
+    st.markdown("- **Rebalancing Suggestions:** Get alerts for portfolio imbalances and rebalancing opportunities.")
+    st.markdown("- **Watchlist Integration:** Add stocks from the screener directly to your watchlist.")
 
-    # Sidebar Footer with Disclaimer and Creator Info
-    st.sidebar.markdown("---")
-    st.sidebar.info("Disclaimer: StockSense AI is for educational and informational purposes only. It does not constitute financial advice. Always consult a qualified financial advisor.")
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        """
-        <div class="sidebar-footer">
-            <p><b>Made by:</b> ANSHIK MANTRI</p>
-            <p><b>Email:</b> <a href="mailto:anshikmantri26@gmail.com">anshikmantri26@gmail.com</a></p>
-            <p>
-                <a href="http://www.linkedin.com/in/anshikmantri" target="_blank">LinkedIn</a> | 
-                <a href="http://www.instagram.com/anshik.m6777/" target="_blank">Instagram</a>
-            </p>
-        </div>
-        """, 
-        unsafe_allow_html=True
+def display_sentiment_analysis():
+    st.header("📰 News and Sentiment Analysis")
+
+    if st.session_state.stock_data.empty:
+        st.warning("Please fetch stock data first in the 'Enhanced Screener' tab.")
+        return
+
+    symbols = st.session_state.stock_data['Symbol'].tolist()
+    selected_symbol = st.selectbox("Select Stock for News Sentiment:", symbols, key='sentiment_select_stock')
+
+    if selected_symbol and selected_symbol in st.session_state.news_sentiment:
+        sentiment_data = st.session_state.news_sentiment[selected_symbol]
+        
+        st.subheader(f"Sentiment for {selected_symbol.replace('.NS', '')}")
+        
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            sentiment_score = sentiment_data.get('sentiment_score', 0)
+            sentiment_label = 'Positive' if sentiment_score > 0.1 else 'Negative' if sentiment_score < -0.1 else 'Neutral'
+            st.metric("Overall Sentiment Score", f"{sentiment_score:.3f}", 
+                      delta_color="normal" if sentiment_label == 'Neutral' else ("inverse" if sentiment_label == 'Negative' else "normal"))
+        with col_s2:
+            st.metric("Sentiment Label", sentiment_label)
+        
+        st.markdown("---")
+        st.subheader("Latest Headlines")
+        headlines = sentiment_data.get('headlines', [])
+        if headlines:
+            for i, headline in enumerate(headlines):
+                st.markdown(f"**{i+1}.** {headline}")
+        else:
+            st.info("No recent headlines found for this stock.")
+    else:
+        st.info("No detailed news sentiment data available for the selected stock. Data fetching usually populates this section.")
+
+def display_stakeholder_tracking():
+    st.header("👥 Stakeholder Tracking")
+
+    if st.session_state.stock_data.empty:
+        st.warning("Please fetch stock data first in the 'Enhanced Screener' tab.")
+        return
+
+    st.write("Track changes in Promoter, DII (Domestic Institutional Investors), and FII (Foreign Institutional Investors) holdings.")
+
+    # Filter for stocks with stakeholder data
+    stakeholder_df = st.session_state.stock_data[[
+        'Symbol', 'Name', 'Promoter_Holding', 'Promoter_Change',
+        'DII_Holding', 'DII_Change', 'FII_Holding', 'FII_Change'
+    ]].dropna(subset=['Promoter_Holding'])
+
+    if stakeholder_df.empty:
+        st.info("No stakeholder data available for display yet.")
+        return
+
+    # Add color formatting based on change
+    def color_change(val):
+        try:
+            val = float(val)
+            if val > 0:
+                return 'background-color: #d4edda; color: #155724' # Light green
+            elif val < 0:
+                return 'background-color: #f8d7da; color: #721c24' # Light red
+            else:
+                return ''
+        except:
+            return ''
+
+    st.dataframe(
+        stakeholder_df.style.applymap(
+            color_change, subset=['Promoter_Change', 'DII_Change', 'FII_Change']
+        ).format({
+            'Promoter_Holding': "{:.2f}%", 'DII_Holding': "{:.2f}%", 'FII_Holding': "{:.2f}%",
+            'Promoter_Change': "{:+.2f}%", 'DII_Change': "{:+.2f}%", 'FII_Change': "{:+.2f}%"
+        }),
+        use_container_width=True
     )
+    st.markdown("---")
+    st.info("Note: Stakeholder data is simulated for demonstration purposes. Real data requires specialized APIs.")
 
+
+def display_settings():
+    st.header("⚙️ Application Settings")
+    st.write("Configure various parameters for the screener and alerts.")
+    
+    st.subheader("API Keys (for full functionality)")
+    st.warning("Ensure these API keys are set up in Streamlit Secrets (`.streamlit/secrets.toml`) for production use. Replace 'your_...' placeholders with actual keys.")
+    st.code("""
+# .streamlit/secrets.toml
+NEWS_API_KEY = "your_news_api_key_here"
+FINOLOGY_API_KEY = "your_finology_api_key_here"
+    """, language="toml")
+    
+    st.subheader("Data Refresh Options")
+    st.write(f"Last data update: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S') if st.session_state.last_update else 'N/A'}")
+    
+    st.subheader("Alert Configuration")
+    
+    st.write("Adjust the sensitivity of real-time alerts:")
+    
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        st.session_state.alert_settings['volume_spike_threshold'] = st.slider(
+            "Volume Spike Threshold (current volume % above 20-day avg)",
+            min_value=100, max_value=500, step=50,
+            value=st.session_state.alert_settings['volume_spike_threshold']
+        )
+    with col_s2:
+        st.session_state.alert_settings['stakeholder_change_threshold'] = st.slider(
+            "Stakeholder Change Threshold (% change)",
+            min_value=0.1, max_value=5.0, step=0.1, format="%.1f%%",
+            value=st.session_state.alert_settings['stakeholder_change_threshold']
+        )
+    
+    st.success("Settings saved automatically.")
+
+def main():
+    st.markdown('<h1 class="main-header">🚀 NSE Pro Screener & Analytics</h1>', unsafe_allow_html=True)
+    
+    # Enhanced Sidebar
+    with st.sidebar:
+        st.title("🎯 Control Center")
+        
+        # Quick Stats
+        if not st.session_state.stock_data.empty:
+            total_stocks = len(st.session_state.stock_data)
+            buy_signals = len(st.session_state.stock_data[
+                st.session_state.stock_data.get('Enhanced_Score', 0) >= 70
+            ])
+            volume_alerts_count = len(st.session_state.stock_data[
+                st.session_state.stock_data.get('Volume_Spike', False) == True
+            ])
+            stakeholder_alerts_count = len(st.session_state.stock_data[
+                st.session_state.stock_data.get('Stakeholder_Alert', False) == True
+            ])
+            
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.markdown(f'<h4>📊 Total Stocks: {total_stocks}</h4>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.markdown(f'<h4>🎯 Strong Buy Signals: {buy_signals}</h4>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.markdown(f'<h4>⚠️ Volume Spike Alerts: {volume_alerts_count}</h4>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.markdown(f'<h4>👥 Stakeholder Change Alerts: {stakeholder_alerts_count}</h4>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown("---")
+        # Auto-update toggle
+        auto_update = st.checkbox("🔄 Auto-Update (every 15 min)",
+                                 value=st.session_state.auto_update_enabled,
+                                 help="Automatically refresh data every 15 minutes. Note: Data fetching can be slow.")
+        st.session_state.auto_update_enabled = auto_update
+
+        st.info(f"Last data update: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S') if st.session_state.last_update else 'N/A'}")
+        
+        # Manual refresh button
+        if st.button("Manual Refresh Data Now", use_container_width=True):
+            st.session_state.trigger_update = True
+            st.experimental_rerun() # Rerun to trigger the data fetch logic
+
+    # Main tabs with enhanced features
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "📊 Enhanced Screener", "🚨 Real-time Alerts", "📈 Technical Analysis",
+        "💼 Smart Portfolio", "📰 Sentiment Analysis", "👥 Stakeholder Tracking", "⚙️ Settings"
+    ])
+
+    # Initialize screener
+    screener = EnhancedNSEScreener()
+
+    # Data fetching logic (triggered by button or auto-update)
+    if st.session_state.trigger_update:
+        with st.spinner("Fetching and analyzing latest stock data... This may take a few moments."):
+            try:
+                top_stocks = screener.get_nse_top_stocks(count=st.session_state.get('selected_stock_count', 50))
+                # Run the async function
+                st.session_state.stock_data = asyncio.run(screener.fetch_comprehensive_data(top_stocks))
+                st.session_state.last_update = datetime.now()
+                st.session_state.trigger_update = False # Reset the flag
+                st.success("Data refreshed successfully!")
+            except Exception as e:
+                st.error(f"Failed to fetch data: {e}. Please try again later.")
+                st.session_state.trigger_update = False
+
+
+    with tab1:
+        st.header("📊 Enhanced Stock Screener")
+
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+
+        with col1:
+            stock_count = st.selectbox("Number of Stocks to Analyze:", [50, 100, 200], index=0, key='selected_stock_count')
+            st.session_state.selected_stock_count = stock_count # Save for refresh
+
+            if st.button("Fetch & Analyze Data", type="primary", use_container_width=True):
+                st.session_state.trigger_update = True
+                st.experimental_rerun() # Rerun to trigger the data fetch logic
+
+        with col2:
+            min_score = st.slider("Min. Enhanced Score:", 0, 100, 60)
+        with col3:
+            selected_sector = st.selectbox("Filter by Sector:", 
+                                         ['All'] + sorted(st.session_state.stock_data['Sector'].dropna().unique().tolist()))
+        with col4:
+            selected_risk = st.selectbox("Filter by Risk Level:", 
+                                         ['All', 'Low Risk', 'Medium Risk', 'High Risk'])
+
+        if not st.session_state.stock_data.empty:
+            filtered_data = st.session_state.stock_data[st.session_state.stock_data['Enhanced_Score'] >= min_score]
+            
+            if selected_sector != 'All':
+                filtered_data = filtered_data[filtered_data['Sector'] == selected_sector]
+            if selected_risk != 'All':
+                filtered_data = filtered_data[filtered_data['Risk_Level'] == selected_risk]
+            
+            st.subheader("Screener Results:")
+            if not filtered_data.empty:
+                # Add 'Status' column based on score for quick glance
+                filtered_data['Recommendation_Status'] = filtered_data['Enhanced_Score'].apply(
+                    lambda x: 'Strong Buy' if x >= 80 else ('Buy' if x >= 65 else ('Hold' if x >= 50 else 'Sell'))
+                )
+                
+                # Format numerical columns for better display
+                display_cols = [
+                    'Symbol', 'Name', 'Current_Price', 'Change_Percent', 'Volume_Ratio',
+                    'PE_Ratio', 'ROE', 'Debt_Equity', 'RSI', 'Technical_Signal',
+                    'News_Sentiment', 'Sentiment_Label', 'Recommendation_Status',
+                    'Enhanced_Score', 'Risk_Level', 'Sector', 'Industry'
+                ]
+                
+                # Ensure all display columns exist, add missing with N/A
+                for col in display_cols:
+                    if col not in filtered_data.columns:
+                        filtered_data[col] = 'N/A'
+
+                st.dataframe(
+                    filtered_data[display_cols].sort_values(by='Enhanced_Score', ascending=False).style.format({
+                        'Current_Price': "{:,.2f}",
+                        'Change_Percent': "{:+.2f}%",
+                        'Volume_Ratio': "{:.2f}x",
+                        'PE_Ratio': "{:,.2f}",
+                        'ROE': "{:,.2f}%",
+                        'Debt_Equity': "{:,.2f}",
+                        'RSI': "{:,.2f}",
+                        'News_Sentiment': "{:+.3f}",
+                        'Enhanced_Score': "{}"
+                    }).applymap(lambda x: 'background-color: #d4edda' if 'Buy' in x else ('background-color: #f8d7da' if 'Sell' in x else ''),
+                                subset=['Recommendation_Status']),
+                    use_container_width=True
+                )
+                
+                st.markdown("---")
+                st.subheader("Key Metrics Overview")
+                
+                # Dynamic metrics
+                avg_pe = filtered_data['PE_Ratio'].replace([np.inf, -np.inf], np.nan).dropna().mean()
+                avg_roe = filtered_data['ROE'].replace([np.inf, -np.inf], np.nan).dropna().mean()
+                avg_volume_ratio = filtered_data['Volume_Ratio'].mean()
+                
+                metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
+                
+                with metrics_col1:
+                    st.metric("Avg. Enhanced Score", f"{filtered_data['Enhanced_Score'].mean():.1f}")
+                with metrics_col2:
+                    st.metric("Avg. PE Ratio", f"{avg_pe:.2f}" if not np.isnan(avg_pe) else "N/A")
+                with metrics_col3:
+                    st.metric("Avg. ROE", f"{avg_roe:.2f}%" if not np.isnan(avg_roe) else "N/A")
+                with metrics_col4:
+                    st.metric("Avg. Volume Ratio", f"{avg_volume_ratio:.2f}x")
+
+                st.markdown("---")
+                st.download_button(
+                    label="Download Filtered Data as CSV",
+                    data=filtered_data.to_csv(index=False).encode('utf-8'),
+                    file_name="nse_screener_data.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+            else:
+                st.info("No stocks match the current filter criteria.")
+        else:
+            st.info("No data available. Click 'Fetch & Analyze Data' to load stocks.")
+
+    with tab2:
+        display_alerts()
+
+    with tab3:
+        display_technical_analysis()
+
+    with tab4:
+        display_smart_portfolio()
+
+    with tab5:
+        display_sentiment_analysis()
+
+    with tab6:
+        display_stakeholder_tracking()
+        
+    with tab7:
+        display_settings()
 
 if __name__ == "__main__":
     main()

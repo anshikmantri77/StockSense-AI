@@ -12,7 +12,7 @@ import random
 import pytz
 warnings.filterwarnings('ignore')
 
-INDIA_TZ = pytz.timezone('Asia/Kolkata')
+
 # Page configuration
 st.set_page_config(
     page_title="StockSense AI",
